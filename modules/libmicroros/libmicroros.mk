@@ -10,8 +10,8 @@ endif
 CFLAGS_INTERNAL := $(X_CFLAGS)
 CXXFLAGS_INTERNAL := $(X_CXXFLAGS)
 
-CFLAGS_INTERNAL := -c -I$(ZEPHYR_BASE)/include/posix -I$(PROJECT_BINARY_DIR)/include/generated $(CFLAGS_INTERNAL)
-CXXFLAGS_INTERNAL := -c -I$(ZEPHYR_BASE)/include/posix -I$(PROJECT_BINARY_DIR)/include/generated $(CXXFLAGS_INTERNAL)
+CFLAGS_INTERNAL := -c -I$(COMPONENT_PATH)/zephyr_compat -I$(ZEPHYR_BASE)/include/posix -I$(PROJECT_BINARY_DIR)/include/generated $(CFLAGS_INTERNAL)
+CXXFLAGS_INTERNAL := -c -I$(COMPONENT_PATH)/zephyr_compat -I$(ZEPHYR_BASE)/include/posix -I$(PROJECT_BINARY_DIR)/include/generated $(CXXFLAGS_INTERNAL)
 
 all: $(COMPONENT_PATH)/libmicroros.a
 

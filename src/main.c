@@ -5,7 +5,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/posix/time.h>
+#include <time.h>
 #else
 #include <zephyr.h>
 #include <device.h>
