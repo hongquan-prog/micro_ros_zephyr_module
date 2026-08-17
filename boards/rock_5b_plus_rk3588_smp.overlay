@@ -1,0 +1,18 @@
+/*
+ * Board wiring for the micro-ROS DDS serial transport on ROCK 5B+.
+ *
+ * The Zephyr console/shell stays on uart2 (see the chosen node in
+ * rock_5b_plus.dts). uart3 is dedicated to the micro-ROS serial transport;
+ * the serial transport driver looks it up via the "microros-uart" alias.
+ */
+
+/ {
+	aliases {
+		microros-uart = &uart3;
+	};
+};
+
+&uart3 {
+	status = "okay";
+	current-speed = <1500000>;
+};

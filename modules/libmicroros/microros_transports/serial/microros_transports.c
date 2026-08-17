@@ -24,7 +24,23 @@
 #include <stdbool.h>
 
 #define RING_BUF_SIZE 2048
-#define UART_NODE DT_NODELABEL(usart1)
+
+/*
+ * The serial transport UART is selected via the devicetree alias
+ * "microros-uart", so each board can point it at its own serial device
+ * (hardware UART, virtio console, ...) in its overlay, e.g.:
+ *
+ *   / {
+ *       aliases {
+ *           microros-uart = &usart1;
+ *       };
+ *   };
+ */
+#define UART_NODE DT_ALIAS(microros_uart)
+
+#if !DT_NODE_EXISTS(UART_NODE)
+#error "No microros-uart alias defined: add an aliases { microros-uart = &...; }; entry to your board overlay"
+#endif
 
 char uart_in_buffer[RING_BUF_SIZE];
 char uart_out_buffer[RING_BUF_SIZE];
