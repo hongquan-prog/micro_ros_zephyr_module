@@ -28,7 +28,9 @@
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
 
 rcl_publisher_t publisher;
+rcl_subscription_t subscriber;
 std_msgs__msg__Int32 msg;
+std_msgs__msg__Int32 recv_msg;
 
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 {
@@ -37,6 +39,12 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 		RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
 		msg.data++;
 	}
+}
+
+void subscription_callback(const void * msgin)
+{
+	const std_msgs__msg__Int32 * m = (const std_msgs__msg__Int32 *)msgin;
+	printf("micro-ROS: received from host: %d\n", m->data);
 }
 
 int main(void)
@@ -67,6 +75,13 @@ int main(void)
 		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
 		"zephyr_int32_publisher"));
 
+	// create subscriber
+	RCCHECK(rclc_subscription_init_default(
+		&subscriber,
+		&node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+		"host_int32_publisher"));
+
 	// create timer,
 	rcl_timer_t timer;
 	const unsigned int timer_timeout = 1000;
@@ -78,8 +93,10 @@ int main(void)
 
 	// create executor
 	rclc_executor_t executor;
-	RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+	RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
 	RCCHECK(rclc_executor_add_timer(&executor, &timer));
+	RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &recv_msg,
+		&subscription_callback, ON_NEW_DATA));
 
 	msg.data = 0;
 

@@ -25,8 +25,27 @@ if MICROROS
              select USB_DEVICE_STACK
         config MICROROS_TRANSPORT_UDP
             bool "micro-ROS UDP network transport"
-        
+        config MICROROS_TRANSPORT_OPENAMP
+            bool "micro-ROS OpenAMP/RPMsg transport"
+            select RING_BUFFER
+            select RPMSG_SERVICE
+            select OPENAMP_WITH_DCACHE
+            help
+                micro-ROS transport over OpenAMP/RPMsg on top of the
+                Zephyr RPMsg service and an IPM mailbox device.
+
     endchoice
+
+    if MICROROS_TRANSPORT_OPENAMP
+        config MICROROS_OPENAMP_BIND_TIMEOUT_MS
+            int "Timeout waiting for the RPMsg endpoint binding (ms)"
+            default 5000
+            help
+                How long zephyr_transport_open waits for the remote side
+                to bind the "microros" endpoint before failing. Use 0 to
+                wait forever, which is useful when the agent (e.g. a Linux
+                guest under a hypervisor) may boot much later than Zephyr.
+    endif
 
     if MICROROS_TRANSPORT_UDP
         config MICROROS_AGENT_IP

@@ -1,18 +1,34 @@
 /*
- * Board wiring for the micro-ROS DDS serial transport on ROCK 5B+.
+ * Board wiring for the micro-ROS OpenAMP/RPMsg transport on ROCK 5B+.
  *
  * The Zephyr console/shell stays on uart2 (see the chosen node in
- * rock_5b_plus.dts). uart3 is dedicated to the micro-ROS serial transport;
- * the serial transport driver looks it up via the "microros-uart" alias.
+ * rock_5b_plus.dts). The micro-ROS transport talks to the peer (a Linux
+ * guest running the micro-ROS agent, started by the hypervisor) over
+ * RPMsg: vrings and buffers live in the 16MB shared memory window at
+ * 0x30000000, doorbells go through the mailbox at 0xFE380000
+ * (GIC SPI 219 towards this side).
+ *
+ * Physical memory map of this setup:
+ *   [0x30000000, 0x31000000)  RPMsg shared memory (16MB)
+ *   [0x40000000, 0x60000000)  Zephyr DRAM (512MB, this image)
  */
 
 / {
-	aliases {
-		microros-uart = &uart3;
+	chosen {
+		zephyr,ipc = &mbox0;
+		zephyr,ipc_shm = &shm0;
+	};
+
+	shm0: memory@30000000 {
+		compatible = "mmio-sram";
+		reg = <0x30000000 DT_SIZE_M(16)>;
 	};
 };
 
-&uart3 {
+&mbox0 {
 	status = "okay";
-	current-speed = <1500000>;
+};
+
+&dram {
+	reg = <0x40000000 DT_SIZE_M(512)>;
 };
