@@ -165,7 +165,7 @@ docker run --rm --net=host --ipc=host --entrypoint bash microros/micro-ros-agent
 
 fork：`~/Workspace/Micro-XRCE-DDS-Agent`。新增一等传输 `zvisor-shm`（`UAGENT_ZVISOR_PROFILE`，Linux 默认 ON）：`src/cpp/transport/zvisor/zvisor_slot.{c,h}`（单槽协议，与 Zephyr 侧逐条对应）+ `ZvisorServerLinux.cpp/hpp`（`Server<CustomEndPoint>` 子类，结构同 OpenAMPServer，上层走 StreamFramingProtocol），复用共享后端 `transport/shm/shm_backend`。**实现细节、CLI、CMake 见 Agent 仓库 `docs/shmem_transports.md` 第 4 节**。
 
-CLI：`micro_ros_agent zvisor-shm --shm-file ... --kick-sock ... --bell-sock ...`（QEMU 测试模式）或 `zvisor-shm --shm-mem 0x30000000 --kick-mmio`（/dev/mem + mailbox 模式）。真 ZVisor 硬件移植只剩门铃：`shm_backend` 门铃通道已是 ops 表，加一个 misc 驱动后端实例即可（kick=ioctl NOTIFY 触发 HVC token 32，bell=poll 等 IRQ 42），窗口仍 /dev/mem mmap（Linux VM 与 Zephyr 同物理地址），槽协议零改动。
+CLI：`micro_ros_agent zvisor-shm --shm-file ... --kick-sock ... --bell-sock ...`（QEMU 测试模式）、`zvisor-shm --shm-mem 0x30000000 --kick-mmio`（/dev/mem + mailbox 裸机模式）或 `zvisor-shm --shm-mem 0x30000000 --doorbell-dev /dev/zvisor-shmem-linux-zephyr`（ZVisor hypervisor 真实链路）。真实链路的窗口仍走 /dev/mem mmap（Linux VM 与 Zephyr 同物理地址，槽协议零改动）；门铃是 `shm_backend` 的第三个 ops 后端 `doorbell_zvisor`：kick = misc 设备 `ioctl(NOTIFY)`（`zvisor_shmem` 驱动发 HVC token 32），bell = `poll()` 等驱动 IRQ 42 处理函数唤醒 + `ioctl(CLEAR_IRQ_COUNT)`。**实现细节、CLI、CMake 见 Agent 仓库 `docs/shmem_transports.md` 第 4 节**。
 
 测试脚本：`TRANSPORT=zvisor-shm ./tests/scripts/run_agent_shm.sh`（默认仍 openamp）。
 
