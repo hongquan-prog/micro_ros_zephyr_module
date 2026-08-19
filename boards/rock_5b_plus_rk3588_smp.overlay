@@ -1,15 +1,24 @@
 /*
- * Board wiring for the micro-ROS OpenAMP/RPMsg transport on ROCK 5B+.
+ * Board wiring for the micro-ROS transports on ROCK 5B+.
  *
  * The Zephyr console/shell stays on uart2 (see the chosen node in
- * rock_5b_plus.dts). The micro-ROS transport talks to the peer (a Linux
- * guest running the micro-ROS agent, started by the hypervisor) over
- * RPMsg: vrings and buffers live in the 16MB shared memory window at
- * 0x30000000, doorbells go through the mailbox at 0xFE380000
- * (GIC SPI 219 towards this side).
+ * rock_5b_plus.dts). Two micro-ROS transports are wired up here; the
+ * active one is selected by Kconfig (CONFIG_MICROROS_TRANSPORT_*):
+ *
+ * 1. OpenAMP/RPMsg (QEMU demo): vrings and buffers live in the 16MB
+ *    shared memory window at 0x30000000, doorbells go through the
+ *    mailbox at 0xFE380000 (GIC SPI 219 towards this side).
+ *
+ * 2. ZVisor shared memory (hypervisor demo): one 16MB GPA window
+ *    provided by ZVisor, split into two fixed halves. Zephyr writes
+ *    requests into the first half and rings the doorbell with
+ *    HVC 0x86000000 + token 16 (raises Linux IRQ 42); Linux writes
+ *    responses into the second half and rings token 32, which raises
+ *    Zephyr IRQ 41.
  *
  * Physical memory map of this setup:
- *   [0x30000000, 0x31000000)  RPMsg shared memory (16MB)
+ *   [0x30000000, 0x30800000)  RPMsg shm / ZVisor request window (8MB)
+ *   [0x30800000, 0x31000000)  ZVisor response window (8MB)
  *   [0x40000000, 0x60000000)  Zephyr DRAM (512MB, this image)
  */
 
@@ -22,6 +31,15 @@
 	shm0: memory@30000000 {
 		compatible = "mmio-sram";
 		reg = <0x30000000 DT_SIZE_M(16)>;
+	};
+
+	zv_shm: zvisor-shmem@30000000 {
+		compatible = "zephyr,zvisor-shmem";
+		reg = <0x30000000 DT_SIZE_M(16)>;
+		zephyr,endpoint-name = "linux-zephyr";
+		zephyr,permissions = <3>;
+		zephyr,hypercall-token = <16>;
+		zephyr,doorbell-irq = <41>;
 	};
 };
 

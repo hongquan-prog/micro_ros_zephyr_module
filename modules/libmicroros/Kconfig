@@ -34,6 +34,16 @@ if MICROROS
                 micro-ROS transport over OpenAMP/RPMsg on top of the
                 Zephyr RPMsg service and an IPM mailbox device.
 
+        config MICROROS_TRANSPORT_ZVISOR_SHMEM
+            bool "micro-ROS ZVisor shared-memory transport"
+            depends on ARM64
+            help
+                micro-ROS transport over the ZVisor shared-memory
+                endpoints: single-slot [u32 len][payload] windows with
+                an HVC doorbell on TX and a virtual IRQ on RX. Requires
+                the zv_shm zephyr,zvisor-shmem node in the
+                devicetree.
+
     endchoice
 
     if MICROROS_TRANSPORT_OPENAMP
