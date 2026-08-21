@@ -38,6 +38,7 @@ volatile static zephyr_transport_params_t default_params = {.fd = 1};
 
 bool zephyr_transport_open(struct uxrCustomTransport * transport);
 bool zephyr_transport_close(struct uxrCustomTransport * transport);
+void zephyr_transport_set_session_active(bool active);
 size_t zephyr_transport_write(struct uxrCustomTransport* transport, const uint8_t * buf, size_t len, uint8_t * err);
 size_t zephyr_transport_read(struct uxrCustomTransport* transport, uint8_t* buf, size_t len, int timeout, uint8_t* err);
 

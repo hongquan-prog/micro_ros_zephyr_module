@@ -27,6 +27,7 @@
 
 #include <zephyr/kernel/mm.h>
 
+#include <stdint.h>
 #include <string.h>
 
 /*
@@ -80,6 +81,7 @@
 #define FRAME_OFF_PAYLOAD	8U
 #define FRAME_HDR_SIZE		8U
 #define FRAME_PAYLOAD_MAX	2048U
+#define TX_SLOT_WAIT_TIMEOUT_MS	1000U
 
 /* Slot ownership states */
 #define SLOT_FREE		0U	/* consumed, writer may reuse */
@@ -143,6 +145,7 @@ uint32_t zvisor_dbg_read_calls;
 uint32_t zvisor_dbg_read_timeouts;
 
 static bool transport_ready;
+static bool transport_session_active;
 
 static void zvisor_shmem_irq(const void *arg)
 {
@@ -191,18 +194,20 @@ bool zephyr_transport_open(struct uxrCustomTransport * transport){
     k_mem_map_phys_bare(&rsp_window, RSP_GPA, WINDOW_MAP_SIZE,
                         K_MEM_CACHE_NONE | K_MEM_PERM_RW);
 
-    /* Initialize both slots: drop any stale frame left by a previous boot */
+    rx_len = 0;
+    rx_off = 0;
+    k_sem_reset(&rx_sem);
     sys_write32(0, (mem_addr_t)req_window + FRAME_OFF_LEN);
     sys_write32(SLOT_FREE, (mem_addr_t)req_window + FRAME_OFF_STATE);
     sys_write32(0, (mem_addr_t)rsp_window + FRAME_OFF_LEN);
     sys_write32(SLOT_FREE, (mem_addr_t)rsp_window + FRAME_OFF_STATE);
     __asm__ volatile ("dsb sy" ::: "memory");
 
-    /* Doorbells are edge notifications (hypervisor-injected vIRQ style) */
     IRQ_CONNECT(DOORBELL_IRQ, 0, zvisor_shmem_irq, NULL, IRQ_TYPE_EDGE);
     irq_enable(DOORBELL_IRQ);
 
-    printk("micro-ROS: ZVisor shmem transport open (req GPA 0x%x token %u, rsp GPA 0x%x irq %u)\n",
+    printk("micro-ROS: ZVisor shmem transport open "
+           "(req GPA 0x%x token %u, rsp GPA 0x%x irq %u)\n",
            REQ_GPA, (unsigned int)DOORBELL_TOKEN, RSP_GPA, DOORBELL_IRQ);
 
     transport_ready = true;
@@ -213,7 +218,20 @@ bool zephyr_transport_close(struct uxrCustomTransport * transport){
     (void) transport;
     irq_disable(DOORBELL_IRQ);
     transport_ready = false;
+    if (req_window != NULL) {
+        k_mem_unmap_phys_bare(req_window, WINDOW_MAP_SIZE);
+        req_window = NULL;
+    }
+    if (rsp_window != NULL) {
+        k_mem_unmap_phys_bare(rsp_window, WINDOW_MAP_SIZE);
+        rsp_window = NULL;
+    }
     return true;
+}
+
+void zephyr_transport_set_session_active(bool active)
+{
+    transport_session_active = active;
 }
 
 size_t zephyr_transport_write(struct uxrCustomTransport* transport, const uint8_t * buf, size_t len, uint8_t * err){
@@ -229,13 +247,22 @@ size_t zephyr_transport_write(struct uxrCustomTransport* transport, const uint8_
     zvisor_dbg_write_calls++;
 
     /* Single message in flight: wait until the peer consumed the slot.
-     * The peer (agent) may start much later than this guest, so wait
-     * indefinitely — the same "block until the peer shows up" semantics
-     * as the serial transport. */
+     * Entity creation keeps the original unbounded late-Agent semantics.
+     * Once a session is active, bound the wait so an exited Agent cannot
+     * stall the lifecycle state machine before it can rebuild the entities. */
     if (sys_read32((mem_addr_t)req_window + FRAME_OFF_STATE) != SLOT_FREE) {
+        int64_t deadline = transport_session_active ?
+            k_uptime_get() + TX_SLOT_WAIT_TIMEOUT_MS : INT64_MAX;
+
         zvisor_dbg_write_waits++;
-        printk("micro-ROS: zvisor shmem waiting for peer to consume TX slot\n");
         while (sys_read32((mem_addr_t)req_window + FRAME_OFF_STATE) != SLOT_FREE) {
+            if (transport_session_active && k_uptime_get() >= deadline) {
+                printk("micro-ROS: zvisor shmem TX slot timed out\n");
+                if (err) {
+                    *err = 1;
+                }
+                return 0;
+            }
             k_sleep(K_MSEC(1));
         }
     }

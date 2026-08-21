@@ -149,8 +149,8 @@ docker run --rm --net=host --ipc=host --entrypoint bash microros/micro-ros-agent
 | Linux → Zephyr | `zv_shm` 后半 @ 0x30800000（8 MiB） | HVC 0x86000000，token 32 | Zephyr IRQ 41 |
 
 - 线协议：每窗口单槽，帧格式 `[u32 payload 长度][u32 state][payload]`（payload 上限 2048 字节，只用窗口首 4 KiB）。state 二值：0=FREE（已消费、写方可复用），1=BUSY（帧待消费）；任意时刻每方向只允许一条消息在途。
-- TX：等槽位变 FREE（Zephyr 侧无限等——对端 agent 可能晚启动，与串口传输"阻塞等对端"语义一致；agent 侧 1s 超时丢帧并触发 fini/init 自愈）→ 写 payload/len → 置 BUSY → 内存屏障 → 门铃；RX：门铃中断只负责唤醒读者（ISR 里**不拷贝数据、不归还槽位**），读者线程检查 state==BUSY（否则视为虚假中断丢弃），把帧拷进 stash 后才把槽置回 FREE——槽位在读者消费完之前绝不归还，否则对端可能在上一帧还没读完时写入下一帧（压测抓到过这个竞态，反向 500 条丢 487 条）。
-- 重启初始化：两侧 open/init 时都把两个槽的 len/state 清零置 FREE，丢弃对端或自己上一次运行的残留帧。
+- TX：建连阶段等槽位变 FREE 时允许阻塞，支持 Agent 晚启动；会话建立后等待上限为 1 秒，使断开的 Agent 不能永久卡住 Zephyr supervisor。写方随后写 payload/len、置 BUSY、执行内存屏障并响门铃。RX 中断只唤醒读者（ISR 里**不拷贝数据、不归还槽位**），读者线程检查 state==BUSY，把帧拷进 stash 后才把槽置回 FREE。
+- 重连初始化：两侧 open/init 时都把两个槽的 len/state 清零置 FREE，丢弃上一次会话的残留帧。Zephyr close 会禁用 IRQ 并释放 request/response 各 4 KiB 的 cache-none 映射，下一次 open 重新映射。
 - 窗口映射为 cache-none（Zephyr 侧 device 内存）：**不能对它用 memcpy**——memcpy 可能生成 ldp/stp，device 内存上非 16 字节对齐的 ldp/stp 会触发 alignment fault（payload 偏移 8 必然踩中）；实现里用 4 字节粒度的 window_read/window_write。
 - 帧与字节流的差异：每个槽是一整帧，但 StreamFramingProtocol 读写是**小块字节流**（先读头部再读 payload），两侧 read 都内置 stash/offset 保存未消费尾部，不能整帧取整帧丢（openamp 传输的 RX ring buffer 解决的是同一个问题）。
 
@@ -159,13 +159,15 @@ docker run --rm --net=host --ipc=host --entrypoint bash microros/micro-ros-agent
 - 传输代码：`modules/libmicroros/microros_transports/zvisor_shmem/microros_transports.c`；窗口 GPA/token/IRQ 全部从设备树节点读（binding：`zephyr,zvisor-shmem.yaml`，在 Zephyr 树 `dts/bindings/zvisor/`）。
 - 端点节点见 `boards/rock_5b_plus_rk3588_smp.overlay` 的 `zv_shm`（单节点 16 MiB，代码按 reg 大小对半切出 req/rsp 两半，token/IRQ 同挂一个节点）；改地址、token 或 IRQ 只动 overlay，不改代码。
 - `k_mem_map_phys_bare` 映射窗口首 4 KiB（`K_MEM_CACHE_NONE|K_MEM_PERM_RW`）；`IRQ_CONNECT` 接 `zv_shm` 的 `zephyr,doorbell-irq`（`IRQ_TYPE_EDGE`）。ISR 只做 `k_sem_give` 唤醒；帧拷贝与槽位归还都在读者线程（传输 read 回调）里完成。
+- `src/main.c` 是 micro-ROS supervisor：建连后每 500 ms 做会话 ping；连续两次失败，或 publish/executor 返回错误时，按逆序 fini executor/timer/subscriber/publisher/node/support，等待 250 ms 后重新注册。它不重启 Zephyr VM，也不影响 GPIO/PWM 等其他线程。
+- 建连前不使用 standalone ping；当前 framed shared-memory server 由第一次 XRCE 建连请求唤醒。Agent 未启动时 transport 阻塞等待，不轮询消耗 CPU。
 - Linux 侧对等实现参考 Zephyr 树 `scripts/zvisor/rock5b/drivers/linux/zvisor_shmem.c`（内核模块，同一协议）。
 
 ### 7.3 Linux agent 侧实现（Micro-XRCE-DDS-Agent fork）
 
 fork：`~/Workspace/Micro-XRCE-DDS-Agent`。新增一等传输 `zvisor-shm`（`UAGENT_ZVISOR_PROFILE`，Linux 默认 ON）：`src/cpp/transport/zvisor/zvisor_slot.{c,h}`（单槽协议，与 Zephyr 侧逐条对应）+ `ZvisorServerLinux.cpp/hpp`（`Server<CustomEndPoint>` 子类，结构同 OpenAMPServer，上层走 StreamFramingProtocol），复用共享后端 `transport/shm/shm_backend`。**实现细节、CLI、CMake 见 Agent 仓库 `docs/shmem_transports.md` 第 4 节**。
 
-CLI：`micro_ros_agent zvisor-shm --shm-file ... --kick-sock ... --bell-sock ...`（QEMU 测试模式）、`zvisor-shm --shm-mem 0x30000000 --kick-mmio`（/dev/mem + mailbox 裸机模式）或 `zvisor-shm --shm-mem 0x30000000 --doorbell-dev /dev/zvisor-shmem-linux-zephyr`（ZVisor hypervisor 真实链路）。真实链路的窗口仍走 /dev/mem mmap（Linux VM 与 Zephyr 同物理地址，槽协议零改动）；门铃是 `shm_backend` 的第三个 ops 后端 `doorbell_zvisor`：kick = misc 设备 `ioctl(NOTIFY)`（`zvisor_shmem` 驱动发 HVC token 32），bell = `poll()` 等驱动 IRQ 42 处理函数唤醒 + `ioctl(CLEAR_IRQ_COUNT)`。**实现细节、CLI、CMake 见 Agent 仓库 `docs/shmem_transports.md` 第 4 节**。
+CLI：`micro_ros_agent zvisor-shm --shm-file ... --kick-sock ... --bell-sock ...`（QEMU 测试模式）、`zvisor-shm --shm-mem 0x30000000 --kick-mmio`（/dev/mem + mailbox 裸机模式）或 `zvisor-shm --doorbell-dev /dev/zvisor-shmem`（Zvisor hypervisor 真实链路）。真实链路通过同一个 misc device mmap 16 MiB window，并用它完成双向 doorbell：kick = `ioctl(NOTIFY)`（驱动发 HVC token 32），bell = `poll()` 等驱动 IRQ 42 处理函数唤醒 + `ioctl(CLEAR_IRQ_COUNT)`；userspace 不再访问 `/dev/mem`。**实现细节、CLI、CMake 见 Agent 仓库 `docs/shmem_transports.md` 第 4 节**。
 
 测试脚本：`TRANSPORT=zvisor-shm ./tests/scripts/run_agent_shm.sh`（默认仍 openamp）。
 
@@ -186,7 +188,7 @@ openamp 回归：`-DEXTRA_CONF_FILE=tests/agent_test.conf` pristine 重建（该
   - ROS 2→Agent→Zephyr：`ros2 topic pub -t 4 /host_int32_publisher std_msgs/msg/Int32 "{data: 777}"` 后 guest 恰好打印 4 行 `received from host: 777`；
   - openamp 回归同流程通过（endpoint bound + datawriter created + echo + 4/4），证明两条传输可并存切换。
 - 验证中踩过的坑（均已修，勿再踩）：①agent 侧 read 整帧取整帧丢导致 StreamFramingProtocol 字节流永不同步（需 RX stash，见 7.1）；②QEMU 侧 kick 脉冲配电平触发 GIC 中断必丢，Zephyr 侧门铃 IRQ 必须 `IRQ_TYPE_EDGE`（见 3.2 第 6 条）；③QEMU GIC gpio 索引 = SPI = INTID-32，IRQ 41 对应 `kick-irq=9`；④cache-none device 内存上 memcpy 的 ldp/stp 会 alignment fault，窗口访问走 4 字节粒度读写（见 7.1）；⑤ISR 里拷贝帧并提前归还槽位的竞态——对端可在上一帧未读完时写入下一帧，压测下反向 500 条丢 487 条；修复为 ISR 只唤醒、读者线程拷贝并归还槽位（见 7.6）。
-- 待做：真 ZVisor 硬件验证（HVC token 16/32 与虚拟 IRQ 41/42 由 hypervisor 转发，QEMU 钩子语义已对齐；agent 侧 kick/bell 换 zvisor_shmem 内核驱动通道，槽协议不变）。
+- 真机已验证：ROCK 5B+ 上使用 `/dev/zvisor-shmem`、HVC token 16/32 和 Guest IRQ 41/42，连续 5 次停止并重新启动 Linux Agent；每轮 participant/datawriter/subscriber 和双向 topic 均成功，两个 VM 全程保持 RUNNING。
 - 已知残留：QEMU 被 SIGTERM 拆掉时 agent 会记录一次 `transport error, reinit`（bell socket 随 QEMU 退出而 EOF），属正常拆链噪声，不影响运行期通信。
 
 ### 7.6 压力测试
