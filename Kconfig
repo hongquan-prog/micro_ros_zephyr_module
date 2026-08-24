@@ -1,4 +1,11 @@
-# PWM/DDS demo configuration.
+# PWM/DDS demo application Kconfig.
+#
+# When an application provides its own Kconfig it becomes the Kconfig root,
+# so the Zephyr core tree must be sourced explicitly.
+
+mainmenu "PWM/DDS demo"
+
+source "Kconfig.zephyr"
 
 menu "PWM/DDS demo"
 

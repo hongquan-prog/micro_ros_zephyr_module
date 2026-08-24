@@ -2,10 +2,10 @@
 
 cmake_minimum_required(VERSION 3.13.1)
 
-# The micro-ROS library module is only pulled in for the real DDS backend.
-if(CONFIG_DEMO_HEARTBEAT_MICROROS)
-  list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/modules/libmicroros)
-endif()
+# The micro-ROS library module is always registered so its Kconfig symbols
+# exist during the configuration phase; the library is only linked when
+# CONFIG_MICROROS=y (selected by CONFIG_DEMO_HEARTBEAT_MICROROS).
+list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/modules/libmicroros)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(pwm_dds_demo)
