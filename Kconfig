@@ -1,0 +1,18 @@
+# PWM/DDS demo configuration.
+
+menu "PWM/DDS demo"
+
+choice DEMO_HEARTBEAT_BACKEND
+	prompt "Heartbeat backend"
+	default DEMO_HEARTBEAT_STUB
+
+config DEMO_HEARTBEAT_STUB
+	bool "Stub (Phase 1: simulated Linux round trip)"
+
+config DEMO_HEARTBEAT_MICROROS
+	bool "micro-ROS (Phase 2: real DDS link)"
+	select MICROROS
+
+endchoice
+
+endmenu

@@ -50,3 +50,36 @@
 &dram {
 	reg = <0x40000000 DT_SIZE_M(512)>;
 };
+
+/* --- Phase 1 signal-chain wiring (PWM/DDS demo) ------------------------ */
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0m2_pins>;
+	pinctrl-names = "default";
+};
+
+&pwm7 {
+	status = "okay";
+	pinctrl-0 = <&pwm7m3_pins>;
+	pinctrl-names = "default";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpio4 {
+	status = "okay";
+};
+
+/* micro-ROS serial transport UART (aliased per the transport's Kconfig
+ * contract; uart2 is the board debug UART on the 40-pin header). */
+/ {
+	aliases {
+		microros-uart = &uart2;
+	};
+};
