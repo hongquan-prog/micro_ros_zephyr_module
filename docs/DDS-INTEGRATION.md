@@ -70,15 +70,19 @@ zephyr 侧串口提供集中式诊断命令（实现 `src/dds_shell.c`）：
 - 排障线索：`rsp=BUSY` + `wr_wait` 增长 = 双槽互相卡死；`isr >> rd` = 消费不及时；
   `rd_to` 高 = RSP 无数据。
 
-## 7. 已知事项 / 后续迁移清单（双方知情）
+## 7. 已知事项 / 迁移清单（双方知情）
 
 - [ ] 同事 baseline 中的"GPIO/PWM API self-test"实现与 `record_*` 函数体不在
       diff 中，合入版为占位 stub（`[COLLEAGUE BASELINE]` 标注）——需同事补全。
 - [ ] zephyr 侧已知小问题：publish 失败时该 seq 已消费（丢一个心跳）；
       多回复排队时 `last_linux_seq` 被最新值覆盖（翻转次数正确、数值错位）；
       `rmw_uros_ping_agent` 阻塞 100ms，Agent 假死期间订阅接收周期性中断。
-- [ ] 上午已完成的本地优化待后续迁移（暂不并入本分支）：
-      rk_timer 硬件定时器（替代 systick）、PWM 100kHz + 12.5/87.5%、
-      心跳超时看门狗、shell 延迟干预命令、板内延迟自测。
+- [x] radxa 增强迁移（分支 `wip/pwm-dds-enhance`，逐项独立 commit）：
+      PWM 100kHz + 12.5/87.5%、心跳超时看门狗、rk_timer 硬件 tick
+      （`DEMO_RK_TIMER` opt-in，默认 n——需 zephyr 树含 rockchip counter
+      驱动与 timer0 节点）、GPIO dt_flags 清理；线程优先级/pin 核此前已迁入。
+- [ ] **决策记录：`LOG_OVERRIDE_LEVEL=1` 不迁**——与联调线 health 日志及 DDS
+      诊断日志（LOG_INF/LOG_WRN）需求冲突；如需静默演示现场再另行处理。
+- [ ] 剩余未迁：shell 延迟干预命令、板内延迟自测（timer1 时间戳）。
 - [ ] 联调成功后合并策略：同事的修复类改动（会话重建、非阻塞 hb_send、
       计数信号量、绝对相位、missed 统计）吸收进主线 radxa-demo。

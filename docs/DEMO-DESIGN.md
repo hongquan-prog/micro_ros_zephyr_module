@@ -8,8 +8,9 @@
 
 | 分支 | 内容 | 状态 |
 | --- | --- | --- |
-| `wip/pwm-dds`（本文档） | DDS 联调线：**双 topic** 心跳、supervisor/reply 线程、systick + 10kHz PWM | 当前联调重点 |
-| `radxa-demo`（主线） | 旧单 topic 设计 + 上午本地优化（rk_timer 硬件定时器、PWM 100kHz/12.5-87.5%、心跳看门狗、优先级/pin 核整改） | 联调打通后把优化迁入，再与联调线融合 |
+| `wip/pwm-dds-enhance`（本文档） | DDS 联调线 + radxa 增强迁移：双 topic 心跳、supervisor/reply 线程、PWM 100kHz/12.5-87.5%、心跳看门狗、rk_timer tick（opt-in） | 当前联调重点 |
+| `wip/pwm-dds` | DDS 联调线（增强迁移前的基线） | 归档 |
+| `radxa-demo`（主线） | 旧单 topic 设计 + 上午本地优化（rk_timer、PWM 100kHz、看门狗、优先级/pin 核） | 优化已逐个迁入本分支；待联调打通后与新设计融合 |
 
 联调线中的 "线程优先级 0 + pin 核 0" 已从主线提前迁入（评审第 4 项）。
 
@@ -19,7 +20,7 @@
 **Zephyr ⇄ Linux 双 topic DDS 心跳闭环**：
 
 - 1ms 周期信号链（**临时调试值 50ms/20Hz**（Kconfig 默认，可 `hb period` 重设），见 §3）
-- 两路 PWM（10kHz、25%/75% 每控制点交替）
+- 两路 PWM（100kHz、12.5%/87.5% 每控制点交替）
 - 三路 GPIO 链路打点（GPIO1 tick / GPIO2 控制点 / GPIO3 Linux 回复）
 - DDS：micro-ROS + ZVisor 共享内存 transport；Agent 断开自动重建会话
 
@@ -38,7 +39,8 @@
 ## 3. 信号时序
 
 ```
-systick ISR (1ms/临时50ms)  -> GPIO1 toggle, timer_tick_seq++
+systick ISR (1ms/临时50ms; 或 rk_timer 硬件定时器, opt-in)
+        -> GPIO1 toggle, timer_tick_seq++
         |  k_sem_give（仅唤醒提示，tick_seq 是真值源）
         v
 控制线程 (prio 0, pin 核0):
@@ -50,6 +52,7 @@ DDS supervisor 线程 (prio 5): 发布 pending -> Linux 收到 -> 回复
         |
         v
 reply 线程 (prio 4): 每个回复 -> GPIO3 toggle + PWM2 翻转（计数信号量，不合并）
+（回复看门狗：Linux 静默 >5ms 时本地兜底翻转 GPIO3/PWM2，stall/恢复各打一行日志）
 ```
 
 - **相位绝对化**：GPIO2/PWM1 不再用局部状态翻转，而是 `timer_ticks & 1` 推导，
@@ -143,15 +146,22 @@ west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
 west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
   -DZEPHYR_SDK_INSTALL_DIR=/com/zephyrproject/sdk/v0.16.9 \
   -DHEARTBEAT_STUB=y
+
+# rk_timer 硬件 tick（opt-in，需 zephyr 树含 rockchip counter 驱动与 timer0 节点）
+west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
+  -DZEPHYR_SDK_INSTALL_DIR=/com/zephyrproject/sdk/v0.16.9 \
+  -DCONFIG_DEMO_RK_TIMER=y
 ```
 
 ## 8. 已知事项与后续计划
 
-见 [DDS-INTEGRATION.md](DDS-INTEGRATION.md) §6：
+见 [DDS-INTEGRATION.md](DDS-INTEGRATION.md) §7：
 - 同事 baseline 的 self-test / `record_*` 实现待补全；
 - zephyr 侧三个已知小问题（publish 失败丢 seq、last_linux 覆盖、ping 阻塞）；
-- 联调打通后从主线迁入：rk_timer、PWM 100kHz、心跳看门狗、shell 延迟干预、
-  板内延迟自测，最终融合两条线。
+- **已从主线迁入本分支**：PWM 100kHz/12.5-87.5%、心跳看门狗、rk_timer tick
+  （opt-in，`DEMO_RK_TIMER`）、GPIO dt_flags 清理；优先级/pin 核此前已迁入；
+  `LOG_OVERRIDE_LEVEL` 决策不迁（与联调诊断/health 日志冲突，已记录）；
+- 剩余：shell 延迟干预、板内延迟自测；最终融合两条线。
 
 ## 9. 验证方法
 
@@ -160,5 +170,5 @@ west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
 | GPIO1（Pin 37） | 500Hz 方波 | 25Hz 方波 |
 | GPIO2（Pin 28） | 滞后 GPIO1 一个调度延迟 | 同左 |
 | GPIO3（Pin 29） | 由 Linux 回复节奏驱动（≤500Hz，负载下变慢） | 同左 |
-| PWM1/2 | 10kHz，25/75 交替，控制点对齐各自 GPIO | 同左（控制点 50ms 一次） |
+| PWM1/2 | 100kHz，12.5/87.5 交替，控制点对齐各自 GPIO | 同左（控制点 50ms 一次） |
 | 串口 | `hb t=.. c=.. m=.. tx=.. rx=..` 一行/秒（50ms 周期下一行/50s） | — |
