@@ -127,7 +127,8 @@ static void signal_chain_thread(void *arg1, void *arg2, void *arg3)
 
 K_THREAD_DEFINE(signal_chain_tid, 1024,
 		signal_chain_thread, NULL, NULL, NULL,
-		CONFIG_NUM_PREEMPT_PRIORITIES - 1, 0, 0);
+		0 /* highest thread priority: keep GPIO2/PWM1 latency minimal */,
+		0, 0);
 
 /* --- init -------------------------------------------------------------- */
 
