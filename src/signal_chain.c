@@ -43,7 +43,12 @@ LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 #define PWM_PERIOD_US		100U	/* 10 kHz */
 #define PWM_DUTY_LOW_US		25U	/* 25% */
 #define PWM_DUTY_HIGH_US	75U	/* 75% */
-#define CONTROL_PERIOD_MS	1U
+#define CONTROL_PERIOD_MS	20U	/* TEMPORARY debug value: 20 ms / 50 Hz.
+				 * Normal operation is 1U (1 ms / 1000 Hz); the
+				 * longer period thins out GPIO/PWM control points
+				 * and drops the health log to one line per
+				 * 1000 ticks = 20 s while debugging the DDS link.
+				 * Restore to 1U after the integration session. */
 #define HEALTH_PERIOD_TICKS	1000U	/* 1 s */
 
 /* PWMs. */
