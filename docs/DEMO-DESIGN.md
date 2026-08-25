@@ -79,7 +79,9 @@ demo/src/
 ├── signal_chain.c   # 信号链：tick ISR → 控制线程 → 回复回调
 ├── heartbeat_dds.h  # 心跳抽象（hb_init / hb_send，非阻塞语义）
 ├── dds_stub.c       # P1 打桩（默认后端）
-└── dds_microros.c   # P2 真 DDS：双 topic + supervisor/reply 线程
+├── dds_microros.c   # P2 真 DDS：双 topic + supervisor/reply 线程
+├── dds_diag.h       # 诊断快照结构 + 只读 getter 声明
+└── dds_shell.c      # "dds" 诊断 shell（status/stats/shm）
 ```
 
 ### DDS 后端要点
@@ -97,7 +99,26 @@ demo/src/
 - 完整字段（last_linux / gpio_errors / pwm_errors / tx_offline）及调试降频方法
   见 `src/signal_chain.c` 中该行上方注释。
 
-## 6. 构建命令（备查）
+## 6. DDS 诊断 shell（`dds` 命令集）
+
+针对联调（尤其"tx slot busy"）排障的集中式诊断工具：
+
+| 命令 | 用途 |
+| --- | --- |
+| `dds status` | 会话（UP/DOWN、重建次数）、实体 6 步位图、TX/RX 槽位状态与帧长、线程状态与栈余量、pending/received seq |
+| `dds stats [reset]` | 信号链计数（tx/rx/missed/errors）、DDS 计数（rebuilds/publish_fail/ping_fail）、transport 六计数器；reset 清 transport 计数 |
+| `dds shm [dump [n]]` | 槽位状态 + rsp 窗口 hexdump（协议级对帧） |
+
+实现要点：
+- **transport 零改动**：槽位按 GPA 直读 shm 窗口，六计数器直接 extern 引用；
+  "RSP 消费延迟"指标（ISR 到达→释放槽位）需改 transport，**待双方拍板后单独加**；
+- shell 轮询串口后端（中断驱动 uart2 挂起，见 TODO #9）、线程优先级 5（低于控制线程 0），
+  不污染 1ms 控制路径；
+- Kconfig `DEMO_DDS_SHELL`（默认 y，可关省 RAM）；stub 后端同样可运行；
+- 排障线索：`rsp=BUSY` 且 `wr_wait` 增长 = zephyr TX 被堵；`isr` 与 `rd` 差距大 =
+  中断到了但消费不及时；`rd_to` 高 = RSP 迟迟无数据。
+
+## 7. 构建命令（备查）
 
 ```bash
 # P1（打桩）
@@ -110,7 +131,7 @@ west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
   -DEXTRA_CONF_FILE=prj_ros.conf
 ```
 
-## 7. 已知事项与后续计划
+## 8. 已知事项与后续计划
 
 见 [DDS-INTEGRATION.md](DDS-INTEGRATION.md) §6：
 - 同事 baseline 的 self-test / `record_*` 实现待补全；
@@ -118,7 +139,7 @@ west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
 - 联调打通后从主线迁入：rk_timer、PWM 100kHz、心跳看门狗、shell 延迟干预、
   板内延迟自测，最终融合两条线。
 
-## 8. 验证方法
+## 9. 验证方法
 
 | 观测点 | 预期（1ms 周期时） | 预期（临时 20ms 周期） |
 | --- | --- | --- |

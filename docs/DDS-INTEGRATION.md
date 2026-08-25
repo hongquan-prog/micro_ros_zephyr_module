@@ -47,7 +47,23 @@
   `src/signal_chain.c` 中该行上方注释；调试时可调大 `HEALTH_PERIOD_TICKS`
   （如 10000）降低打印频率，避免打印扰动 1ms 控制路径。
 
-## 6. 已知事项 / 后续迁移清单（双方知情）
+## 6. DDS 诊断 shell（`dds` 命令集，已落地）
+
+zephyr 侧串口提供集中式诊断命令（实现 `src/dds_shell.c`）：
+
+| 命令 | 输出 |
+| --- | --- |
+| `dds status` | shm 槽位状态/帧长、信号链计数、会话 UP/DOWN、实体位图、pending/received seq、线程状态与栈余量 |
+| `dds stats [reset]` | 信号链/DDS/transport 全计数；reset 清 transport 计数 |
+| `dds shm [dump [n]]` | 槽位状态 + rsp 窗口 hexdump |
+
+- transport 模块当前零改动（槽位按 GPA 直读、计数器 extern 引用）；
+- **待定**："RSP 消费延迟"指标（ISR 到达→释放槽位的时间差）需在 transport 埋点，
+  拍板后单独加，用于直接佐证 "tx slot busy = zephyr 消费不及时"。
+- 排障线索：`rsp=BUSY` + `wr_wait` 增长 = 双槽互相卡死；`isr >> rd` = 消费不及时；
+  `rd_to` 高 = RSP 无数据。
+
+## 7. 已知事项 / 后续迁移清单（双方知情）
 
 - [ ] 同事 baseline 中的"GPIO/PWM API self-test"实现与 `record_*` 函数体不在
       diff 中，合入版为占位 stub（`[COLLEAGUE BASELINE]` 标注）——需同事补全。
