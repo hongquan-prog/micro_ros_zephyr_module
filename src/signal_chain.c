@@ -180,14 +180,23 @@ static void signal_chain_thread(void *arg1, void *arg2, void *arg3)
 			do {
 				next_health_tick += HEALTH_PERIOD_TICKS;
 			} while ((int32_t)(timer_ticks - next_health_tick) >= 0);
-			LOG_INF("runtime health: timer_ticks=%u control=%u missed=%ld tx=%u rx=%u last_linux=%u gpio_errors=%ld pwm_errors=%ld tx_offline=%ld",
+
+			/* Periodic health line, kept deliberately short: a long line
+			 * costs ~600 us on the 1.5 Mbaud console and perturbs the
+			 * 1 ms control path (see missed counter).  Field semantics:
+			 *   t = monotonic timer ticks, c = control activations,
+			 *   m = missed ticks, tx = zephyr seq sent,
+			 *   rx = linux heartbeats received.
+			 * Full line (colleague baseline) additionally carried:
+			 *   last_linux = last received linux seq,
+			 *   gpio_errors / pwm_errors = driver call failures,
+			 *   tx_offline = hb_send -ENOTCONN count.
+			 * While debugging, raise HEALTH_PERIOD_TICKS (e.g. 10000)
+			 * to print less often. */
+			LOG_INF("hb t=%u c=%u m=%ld tx=%u rx=%u",
 				timer_ticks, control_count,
 				atomic_get(&missed_tick_count), zephyr_seq,
-				(uint32_t)atomic_get(&heartbeat_rx_count),
-				(uint32_t)atomic_get(&last_linux_seq),
-				atomic_get(&gpio_error_count),
-				atomic_get(&pwm_error_count),
-				atomic_get(&heartbeat_send_error_count));
+				(uint32_t)atomic_get(&heartbeat_rx_count));
 		}
 	}
 }
