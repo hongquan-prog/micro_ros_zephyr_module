@@ -181,6 +181,11 @@ int signal_chain_init(void)
 
 	k_sem_init(&tick_sem, 0, 1);
 
+	/* Same core as the tick ISR (see prj.conf): minimal, stable
+	 * ISR->thread handoff latency. The thread is blocked on the sem
+	 * here, so pinning is allowed in PIN_ONLY mode. */
+	k_thread_cpu_pin(signal_chain_tid, 0);
+
 	ret = hb_init(heartbeat_reply);
 	if (ret != 0) {
 		LOG_ERR("hb_init failed (%d)", ret);
