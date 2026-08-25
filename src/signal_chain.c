@@ -45,7 +45,6 @@ LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 #define PWM_DUTY_HIGH_US	75U	/* 75% */
 #define CONTROL_PERIOD_MS	1U
 #define HEALTH_PERIOD_TICKS	1000U	/* 1 s */
-#define CONTROL_THREAD_PRIORITY	2
 
 /* PWMs. */
 static const struct pwm_dt_spec pwm1 = {
@@ -195,7 +194,8 @@ static void signal_chain_thread(void *arg1, void *arg2, void *arg3)
 
 K_THREAD_DEFINE(signal_chain_tid, 1024,
 		signal_chain_thread, NULL, NULL, NULL,
-		K_PRIO_PREEMPT(CONTROL_THREAD_PRIORITY), 0, 0);
+		0 /* top priority: keep the GPIO2/PWM1 control point latency minimal */,
+		0, 0);
 
 /* --- init -------------------------------------------------------------- */
 
@@ -243,6 +243,12 @@ int signal_chain_init(void)
 	 * coalesce under load. */
 	k_timer_init(&tick_timer, tick_timer_expired, NULL);
 	k_sem_init(&tick_sem, 0, 1);
+
+	/* Pin the control thread to CPU0, the same core the systick/rk_timer
+	 * interrupt is delivered on, to avoid cross-core wakeup jitter in the
+	 * GPIO1->GPIO2 leg.  The thread is blocked on the semaphore here, so
+	 * pinning is allowed in PIN_ONLY mode. */
+	k_thread_cpu_pin(signal_chain_tid, 0);
 
 	ret = hb_init(heartbeat_reply);
 	if (ret != 0) {
