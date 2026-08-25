@@ -4,7 +4,8 @@
  *
  * Signal chain for the PWM/DDS demo:
  *
- *   1 ms systick (k_timer ISR)   -> GPIO1 toggle, wake worker thread
+ *   1 ms bus-timer ISR (counter top callback)
+ *                      -> GPIO1 toggle, wake worker thread
  *   worker thread (on sem)       -> GPIO2 toggle, PWM1 duty flip, hb_send
  *   reply callback (workqueue)   -> GPIO3 toggle, PWM2 duty flip
  *
@@ -21,6 +22,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
@@ -48,24 +50,26 @@ static const struct pwm_dt_spec pwm2 = {
 	.flags = 0,
 };
 
-/* GPIO link probes, all outputs starting low. */
+/* GPIO link probes, all outputs starting low. Direction is applied at
+ * runtime via gpio_pin_configure_dt() (GPIO_OUTPUT does not fit in the
+ * 16-bit dt_flags field). */
 static const struct gpio_dt_spec gpio_probe1 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio0)),
 	.pin = 0,
-	.dt_flags = GPIO_OUTPUT,
 };
 static const struct gpio_dt_spec gpio_probe2 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio4)),
 	.pin = 21,
-	.dt_flags = GPIO_OUTPUT,
 };
 static const struct gpio_dt_spec gpio_probe3 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
 	.pin = 3,
-	.dt_flags = GPIO_OUTPUT,
 };
 
-static struct k_timer tick_timer;
+/* Independent hardware tick: RK3588 bus timer (timer0). */
+static const struct device *tick_counter =
+	DEVICE_DT_GET(DT_NODELABEL(timer0));
+
 static struct k_sem tick_sem;
 
 static uint32_t zephyr_seq;
@@ -74,10 +78,13 @@ static bool pwm2_high_duty;
 
 /* --- control points ---------------------------------------------------- */
 
-/* Control point 1: 1 ms systick ISR. */
-static void tick_timer_expired(struct k_timer *timer)
+/* Control point 1: 1 ms hardware timer (counter top callback, ISR context).
+ * The bus timer reloads itself in hardware, so the callback fires with no
+ * software re-arm jitter. */
+static void tick_top_callback(const struct device *dev, void *user_data)
 {
-	ARG_UNUSED(timer);
+	ARG_UNUSED(dev);
+	ARG_UNUSED(user_data);
 
 	gpio_pin_toggle_dt(&gpio_probe1);
 	k_sem_give(&tick_sem);
@@ -126,6 +133,7 @@ K_THREAD_DEFINE(signal_chain_tid, 1024,
 
 int signal_chain_init(void)
 {
+	struct counter_top_cfg top_cfg;
 	int ret;
 
 	if (!device_is_ready(pwm1.dev) || !device_is_ready(pwm2.dev)) {
@@ -159,8 +167,17 @@ int signal_chain_init(void)
 		return ret;
 	}
 
-	/* 1 ms systick: CONFIG_SYS_CLOCK_TICKS_PER_SEC = 1000. */
-	k_timer_init(&tick_timer, tick_timer_expired, NULL);
+	/* 1 ms hardware tick: bus timer (timer0) top callback, no re-arm. */
+	if (!device_is_ready(tick_counter)) {
+		LOG_ERR("tick counter not ready");
+		return -ENODEV;
+	}
+
+	top_cfg.ticks = counter_us_to_ticks(tick_counter, 1000);
+	top_cfg.callback = tick_top_callback;
+	top_cfg.user_data = NULL;
+	top_cfg.flags = 0;
+
 	k_sem_init(&tick_sem, 0, 1);
 
 	ret = hb_init(heartbeat_reply);
@@ -169,7 +186,17 @@ int signal_chain_init(void)
 		return ret;
 	}
 
-	k_timer_start(&tick_timer, K_MSEC(1), K_MSEC(1));
+	ret = counter_set_top_value(tick_counter, &top_cfg);
+	if (ret != 0) {
+		LOG_ERR("counter_set_top_value failed (%d)", ret);
+		return ret;
+	}
+
+	ret = counter_start(tick_counter);
+	if (ret != 0) {
+		LOG_ERR("counter_start failed (%d)", ret);
+		return ret;
+	}
 
 	LOG_INF("signal chain started: PWM 10kHz 25%%<->75%%, GPIO probes low");
 
