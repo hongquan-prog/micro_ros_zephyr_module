@@ -9,8 +9,8 @@
  *                                   hb_send
  *   Linux DDS reply callback     -> GPIO3 toggle, PWM2 duty flip
  *
- * Both PWMs run at 10 kHz and alternate 25% / 75% duty each control point,
- * starting in phase at 25%.
+ * Both PWMs run at 100 kHz and alternate 12.5% / 87.5% duty each control
+ * point, starting in phase at 12.5%.
  *
  * Pin map (ROCK 5B+ 40-pin, per Radxa GPIO table):
  *   PWM1  Pin 31  pwm0  GPIO1_A2 (PWM0_M2)
@@ -42,9 +42,9 @@
 
 LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 
-#define PWM_PERIOD_US		100U	/* 10 kHz */
-#define PWM_DUTY_LOW_US		25U	/* 25% */
-#define PWM_DUTY_HIGH_US	75U	/* 75% */
+#define PWM_PERIOD_US		10U	/* 100 kHz */
+#define PWM_DUTY_LOW_NSEC	12500U	/* 12.5% */
+#define PWM_DUTY_HIGH_NSEC	87500U	/* 87.5% */
 #define HEALTH_PERIOD_TICKS	1000U	/* 1 s */
 
 /* PWMs. */
@@ -134,8 +134,8 @@ static void heartbeat_reply(uint32_t linux_seq)
 
 	pwm2_high_duty = !pwm2_high_duty;
 	pwm_set_dt(&pwm2, PWM_USEC(PWM_PERIOD_US),
-		   PWM_USEC(pwm2_high_duty ? PWM_DUTY_HIGH_US :
-						 PWM_DUTY_LOW_US));
+		   PWM_NSEC(pwm2_high_duty ? PWM_DUTY_HIGH_NSEC :
+					    PWM_DUTY_LOW_NSEC));
 }
 
 /* Control point 2: worker thread woken by the tick. */
@@ -170,8 +170,8 @@ static void signal_chain_thread(void *arg1, void *arg2, void *arg3)
 
 		record_pwm_result(pwm_set_dt(
 			&pwm1, PWM_USEC(PWM_PERIOD_US),
-			PWM_USEC(high_phase ? PWM_DUTY_HIGH_US :
-						PWM_DUTY_LOW_US)));
+			PWM_NSEC(high_phase ? PWM_DUTY_HIGH_NSEC :
+						PWM_DUTY_LOW_NSEC)));
 
 		/* Match the accepted stub signal chain: each control activation
 		 * submits one monotonically increasing heartbeat.  hb_send() only
@@ -239,11 +239,11 @@ int signal_chain_init(void)
 		return ret;
 	}
 
-	/* Both PWMs start in phase at 25% duty, 10 kHz. */
+	/* Both PWMs start in phase at 12.5% duty, 100 kHz. */
 	ret = pwm_set_dt(&pwm1, PWM_USEC(PWM_PERIOD_US),
-			 PWM_USEC(PWM_DUTY_LOW_US));
+			 PWM_NSEC(PWM_DUTY_LOW_NSEC));
 	ret |= pwm_set_dt(&pwm2, PWM_USEC(PWM_PERIOD_US),
-			  PWM_USEC(PWM_DUTY_LOW_US));
+			  PWM_NSEC(PWM_DUTY_LOW_NSEC));
 	if (ret != 0) {
 		LOG_ERR("PWM init failed (%d)", ret);
 		return ret;
@@ -275,7 +275,8 @@ int signal_chain_init(void)
 	k_timer_start(&tick_timer, K_MSEC(control_period_ms),
 		      K_MSEC(control_period_ms));
 
-	LOG_INF("signal chain started: control=1ms heartbeat=request-per-cycle PWM=10kHz 25%%<->75%%");
+	LOG_INF("signal chain started: control=%ums heartbeat=request-per-cycle PWM=100kHz 12.5%%<->87.5%%",
+		control_period_ms);
 
 	return 0;
 }
