@@ -42,4 +42,20 @@ config DEMO_CONTROL_PERIOD_MS
 	  is being brought up; restore to 1 ms afterwards.  Can be
 	  overridden at runtime with "hb period <ms>" / "hb freq <hz>".
 
+config DEMO_RK_TIMER
+	bool "Use the RK3588 bus timer for the control tick (hard real-time)"
+	default n
+	help
+	  Drive the signal chain tick from the RK3588 bus timer (timer0)
+	  counter driver instead of the systick k_timer.  The hardware
+	  auto-reload fires the 1 ms callback with no software re-arm
+	  jitter, and supports sub-millisecond periods (hb period accepts
+	  them; the systick path is limited to >= 1 ms).
+
+	  Requires the rockchip counter driver and the timer0 devicetree
+	  node in the Zephyr tree (commits on wip/hongquan.li/
+	  ProcessONE-RTOS-Demo, archived at gerrit wip/libryan/pwm-rk3588).
+	  Default n so builds against Zephyr trees without the driver keep
+	  working.
+
 endmenu

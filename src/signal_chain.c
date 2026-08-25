@@ -30,6 +30,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
+#include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
@@ -84,7 +85,14 @@ static const struct gpio_dt_spec gpio_probe3 = {
 	.dt_flags = GPIO_OUTPUT,
 };
 
+#if !IS_ENABLED(CONFIG_DEMO_RK_TIMER)
 static struct k_timer tick_timer;
+#endif
+#if IS_ENABLED(CONFIG_DEMO_RK_TIMER)
+/* Independent hardware tick: RK3588 bus timer (timer0), auto-reload. */
+static const struct device *tick_counter =
+	DEVICE_DT_GET(DT_NODELABEL(timer0));
+#endif
 static struct k_sem tick_sem;
 static struct k_timer hb_watchdog;
 static volatile uint32_t last_reply_ms;
@@ -121,7 +129,20 @@ static void record_pwm_result(int ret)
 
 /* --- control points ---------------------------------------------------- */
 
-/* Control point 1: 1 ms systick ISR. */
+/* Control point 1: 1 ms tick ISR.  With DEMO_RK_TIMER the tick is the
+ * rk_timer counter top callback (hardware auto-reload, no re-arm
+ * jitter); otherwise the systick k_timer expiry. */
+#if IS_ENABLED(CONFIG_DEMO_RK_TIMER)
+static void tick_top_callback(const struct device *dev, void *user_data)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(user_data);
+
+	record_gpio_result(gpio_pin_toggle_dt(&gpio_probe1));
+	atomic_inc(&timer_tick_seq);
+	k_sem_give(&tick_sem);
+}
+#else
 static void tick_timer_expired(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
@@ -133,6 +154,7 @@ static void tick_timer_expired(struct k_timer *timer)
 	 * truth, so multiple expiries cannot silently turn into one elapsed tick. */
 	k_sem_give(&tick_sem);
 }
+#endif
 
 /* Control point 3: Linux heartbeat reply (reply-thread context). */
 static void heartbeat_reply(uint32_t linux_seq)
@@ -255,6 +277,29 @@ K_THREAD_DEFINE(signal_chain_tid, 1024,
 
 /* --- init -------------------------------------------------------------- */
 
+#if IS_ENABLED(CONFIG_DEMO_RK_TIMER)
+/* (Re)program the counter top value to the current control period and
+ * start it.  Used at init and from "hb period" changes. */
+static int signal_chain_start_tick(void)
+{
+	const struct counter_top_cfg top_cfg = {
+		.ticks = counter_us_to_ticks(tick_counter,
+					     (uint64_t)control_period_ms * 1000U),
+		.callback = tick_top_callback,
+		.user_data = NULL,
+		.flags = 0,
+	};
+	int ret;
+
+	ret = counter_set_top_value(tick_counter, &top_cfg);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return counter_start(tick_counter);
+}
+#endif
+
 int signal_chain_init(void)
 {
 	int ret;
@@ -294,12 +339,29 @@ int signal_chain_init(void)
 	 * block here; its implementation is not part of the provided diff. */
 	LOG_INF("GPIO/PWM API self-test PASS: assigned access works, allow masks reject unassigned resources");
 
-	/* 1 ms systick: CONFIG_SYS_CLOCK_TICKS_PER_SEC = 1000.  The semaphore
-	 * wakes the worker; timer_tick_seq preserves elapsed ticks if wakeups
-	 * coalesce under load.  The period is the Kconfig default and can be
-	 * changed at runtime with "hb period <ms>". */
-	k_timer_init(&tick_timer, tick_timer_expired, NULL);
+	/* 1 ms tick: systick k_timer, or the rk_timer counter top callback
+	 * when DEMO_RK_TIMER=y.  The semaphore wakes the worker;
+	 * timer_tick_seq preserves elapsed ticks if wakeups coalesce under
+	 * load.  The period is the Kconfig default and can be changed at
+	 * runtime with "hb period <ms>". */
 	k_sem_init(&tick_sem, 0, 1);
+
+#if IS_ENABLED(CONFIG_DEMO_RK_TIMER)
+	if (!device_is_ready(tick_counter)) {
+		LOG_ERR("tick counter not ready");
+		return -ENODEV;
+	}
+
+	ret = signal_chain_start_tick();
+	if (ret != 0) {
+		LOG_ERR("counter tick start failed (%d)", ret);
+		return ret;
+	}
+#else
+	k_timer_init(&tick_timer, tick_timer_expired, NULL);
+	k_timer_start(&tick_timer, K_MSEC(control_period_ms),
+		      K_MSEC(control_period_ms));
+#endif
 
 	/* Reply watchdog: k_timer ISR context, local fallback on stall. */
 	last_reply_ms = k_uptime_get_32();
@@ -318,9 +380,6 @@ int signal_chain_init(void)
 		LOG_ERR("hb_init failed (%d)", ret);
 		return ret;
 	}
-
-	k_timer_start(&tick_timer, K_MSEC(control_period_ms),
-		      K_MSEC(control_period_ms));
 
 	LOG_INF("signal chain started: control=%ums heartbeat=request-per-cycle PWM=100kHz 12.5%%<->87.5%%",
 		control_period_ms);
@@ -347,14 +406,21 @@ int signal_chain_set_period(uint32_t ms)
 		return -EINVAL;
 	}
 
-	/* Restart the tick timer with the new period; the worker derives
+	/* Restart the tick source with the new period; the worker derives
 	 * the output phase from timer_tick_seq, so the phase stays valid
-	 * across the change. */
+	 * across the change.  (The rk_timer counter path could support
+	 * sub-millisecond periods; the range check keeps both paths
+	 * uniform for now.) */
 	control_period_ms = ms;
+
+#if IS_ENABLED(CONFIG_DEMO_RK_TIMER)
+	return signal_chain_start_tick();
+#else
 	k_timer_stop(&tick_timer);
 	k_timer_start(&tick_timer, K_MSEC(ms), K_MSEC(ms));
 
 	return 0;
+#endif
 }
 
 uint32_t signal_chain_get_period(void)
