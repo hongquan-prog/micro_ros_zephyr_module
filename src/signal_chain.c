@@ -68,21 +68,20 @@ static const struct pwm_dt_spec pwm2 = {
 	.flags = 0,
 };
 
-/* GPIO link probes, all outputs starting low. */
+/* GPIO link probes, all outputs starting low.  Direction is applied at
+ * runtime via gpio_pin_configure_dt() (GPIO_OUTPUT does not fit in the
+ * 16-bit dt_flags field and would silently truncate to zero). */
 static const struct gpio_dt_spec gpio_probe1 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio0)),
 	.pin = 0,
-	.dt_flags = GPIO_OUTPUT,
 };
 static const struct gpio_dt_spec gpio_probe2 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio4)),
 	.pin = 21,
-	.dt_flags = GPIO_OUTPUT,
 };
 static const struct gpio_dt_spec gpio_probe3 = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
 	.pin = 3,
-	.dt_flags = GPIO_OUTPUT,
 };
 
 #if !IS_ENABLED(CONFIG_DEMO_RK_TIMER)
