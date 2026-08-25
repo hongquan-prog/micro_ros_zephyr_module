@@ -37,6 +37,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "heartbeat_dds.h"
+#include "dds_diag.h"
 
 LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 
@@ -276,4 +277,17 @@ int signal_chain_init(void)
 	LOG_INF("signal chain started: control=1ms heartbeat=request-per-cycle PWM=10kHz 25%%<->75%%");
 
 	return 0;
+}
+
+void signal_chain_get_diag(struct signal_chain_diag *out)
+{
+	out->timer_ticks = (uint32_t)atomic_get(&timer_tick_seq);
+	out->control_count = control_count;
+	out->missed_ticks = (uint32_t)atomic_get(&missed_tick_count);
+	out->tx_seq = zephyr_seq;
+	out->rx_count = (uint32_t)atomic_get(&heartbeat_rx_count);
+	out->last_linux_seq = (uint32_t)atomic_get(&last_linux_seq);
+	out->gpio_errors = (uint32_t)atomic_get(&gpio_error_count);
+	out->pwm_errors = (uint32_t)atomic_get(&pwm_error_count);
+	out->tx_offline = (uint32_t)atomic_get(&heartbeat_send_error_count);
 }

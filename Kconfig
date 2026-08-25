@@ -22,4 +22,12 @@ config DEMO_HEARTBEAT_MICROROS
 
 endchoice
 
+config DEMO_DDS_SHELL
+	bool "DDS diagnostic shell (dds status/stats/shm)"
+	default y
+	help
+	  Enable the "dds" shell command set for diagnosing the heartbeat
+	  link: session/entity/slot status, counters and shmem slot dumps.
+	  Requires CONFIG_SHELL=y (see prj.conf).
+
 endmenu

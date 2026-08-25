@@ -33,6 +33,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "heartbeat_dds.h"
+#include "dds_diag.h"
 
 LOG_MODULE_REGISTER(dds_microros, LOG_LEVEL_INF);
 
@@ -71,6 +72,11 @@ K_SEM_DEFINE(recv_sem, 0, K_SEM_MAX_LIMIT);
 static atomic_t received_linux_seq;
 static atomic_t session_ready;
 static atomic_t initialized;
+
+/* Diagnostic counters (read via dds_get_diag()). */
+static atomic_t session_rebuilds;
+static atomic_t publish_failures;
+static atomic_t ping_failures_total;
 
 static struct k_spinlock tx_lock;
 static uint32_t pending_tx_seq;
@@ -287,6 +293,7 @@ static bool publish_pending_sequence(void)
 		return true;
 	}
 
+	atomic_inc(&publish_failures);
 	LOG_WRN("publish failed (%d), reconnecting", (int)result);
 	rcl_reset_error();
 	return false;
@@ -333,9 +340,12 @@ static void microros_thread(void *arg1, void *arg2, void *arg3)
 				if (rmw_uros_ping_agent(AGENT_PING_TIMEOUT_MS, 1) ==
 				    RMW_RET_OK) {
 					ping_failures = 0;
-				} else if (++ping_failures >=
-					   AGENT_PING_FAILURE_LIMIT) {
-					session_error = true;
+				} else {
+					atomic_inc(&ping_failures_total);
+					if (++ping_failures >=
+					    AGENT_PING_FAILURE_LIMIT) {
+						session_error = true;
+					}
 				}
 				next_ping_ms = now_ms + AGENT_PING_INTERVAL_MS;
 			}
@@ -349,6 +359,7 @@ static void microros_thread(void *arg1, void *arg2, void *arg3)
 		}
 
 		LOG_WRN("Agent disconnected, rebuilding entities");
+		atomic_inc(&session_rebuilds);
 		destroy_entities(&entities);
 		zephyr_transport_set_session_active(false);
 		k_sleep(K_MSEC(AGENT_WAIT_INTERVAL_MS));
@@ -395,4 +406,47 @@ int hb_send(uint32_t seq)
 	k_spin_unlock(&tx_lock, key);
 
 	return atomic_get(&session_ready) != 0 ? 0 : -ENOTCONN;
+}
+
+void dds_get_diag(struct dds_diag *out)
+{
+	k_spinlock_key_t key;
+
+	out->initialized = atomic_get(&initialized) != 0;
+	out->session_ready = atomic_get(&session_ready) != 0;
+	out->entity_ready_mask = 0;
+	if (entities.support_ready) {
+		out->entity_ready_mask |= BIT(0);
+	}
+	if (entities.node_ready) {
+		out->entity_ready_mask |= BIT(1);
+	}
+	if (entities.publisher_ready) {
+		out->entity_ready_mask |= BIT(2);
+	}
+	if (entities.subscriber_ready) {
+		out->entity_ready_mask |= BIT(3);
+	}
+	if (entities.executor_ready) {
+		out->entity_ready_mask |= BIT(4);
+	}
+	out->session_rebuilds = atomic_get(&session_rebuilds);
+	out->publish_failures = atomic_get(&publish_failures);
+	out->ping_failures_total = atomic_get(&ping_failures_total);
+
+	key = k_spin_lock(&tx_lock);
+	out->pending_tx_seq = pending_tx_seq;
+	out->tx_pending = tx_pending;
+	k_spin_unlock(&tx_lock, key);
+
+	out->received_linux_seq = (int32_t)atomic_get(&received_linux_seq);
+	out->recv_sem_count = k_sem_count_get(&recv_sem);
+
+	k_thread_state_str(&microros_thread_data, out->supervisor_state,
+			   sizeof(out->supervisor_state));
+	k_thread_state_str(&reply_thread_data, out->reply_state,
+			   sizeof(out->reply_state));
+	k_thread_stack_space_get(&microros_thread_data,
+				 &out->supervisor_stack_free);
+	k_thread_stack_space_get(&reply_thread_data, &out->reply_stack_free);
 }

@@ -15,6 +15,10 @@ target_sources(app PRIVATE
 	src/signal_chain.c
 )
 
+if(CONFIG_DEMO_DDS_SHELL)
+  target_sources(app PRIVATE src/dds_shell.c)
+endif()
+
 if(CONFIG_DEMO_HEARTBEAT_STUB)
   target_sources(app PRIVATE src/dds_stub.c)
 elseif(CONFIG_DEMO_HEARTBEAT_MICROROS)
