@@ -15,6 +15,7 @@ if MICROROS
    
     choice
         prompt "micro-ROS transport"
+        default MICROROS_TRANSPORT_ZVISOR_SHMEM if ARM64
         
         config MICROROS_TRANSPORT_SERIAL
             bool "micro-ROS serial transport"

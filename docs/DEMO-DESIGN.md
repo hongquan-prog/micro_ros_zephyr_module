@@ -78,7 +78,7 @@ demo/src/
 ├── main.c           # 后端感知的启动文案
 ├── signal_chain.c/h # 信号链：tick ISR → 控制线程 → 回复回调；周期调优接口
 ├── heartbeat_dds.h  # 心跳抽象（hb_init / hb_send，非阻塞语义）
-├── dds_stub.c       # P1 打桩（默认后端）
+├── dds_stub.c       # 打桩后端（-DHEARTBEAT_STUB=y 时编译）
 ├── dds_microros.c   # P2 真 DDS：双 topic + supervisor/reply 线程
 ├── dds_diag.h       # 诊断快照结构 + 只读 getter 声明
 ├── dds_shell.c      # "dds" 诊断 shell（status/stats/shm）
@@ -132,15 +132,17 @@ demo/src/
 
 ## 7. 构建命令（备查）
 
+单一 `prj.conf`，后端由编译开关选择（Kconfig `DEMO_HEARTBEAT_STUB`，默认 n）：
+
 ```bash
-# P1（打桩）
+# 正式版（真 DDS / micro-ROS / ZVisor shmem，默认）
 west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
   -DZEPHYR_SDK_INSTALL_DIR=/com/zephyrproject/sdk/v0.16.9
 
-# P2（真 DDS / ZVisor shmem）
+# 打桩版（模拟 Linux 往返）
 west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
   -DZEPHYR_SDK_INSTALL_DIR=/com/zephyrproject/sdk/v0.16.9 \
-  -DEXTRA_CONF_FILE=prj_ros.conf
+  -DHEARTBEAT_STUB=y
 ```
 
 ## 8. 已知事项与后续计划

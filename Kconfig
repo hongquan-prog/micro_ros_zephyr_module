@@ -9,18 +9,19 @@ source "Kconfig.zephyr"
 
 menu "PWM/DDS demo"
 
-choice DEMO_HEARTBEAT_BACKEND
-	prompt "Heartbeat backend"
-	default DEMO_HEARTBEAT_STUB
-
 config DEMO_HEARTBEAT_STUB
-	bool "Stub (Phase 1: simulated Linux round trip)"
+	bool "Stub heartbeat backend (simulated Linux round trip)"
+	default n
+	help
+	  Use the stub backend instead of the real micro-ROS DDS link.
+	  Enable at build time with -DHEARTBEAT_STUB=y.
 
 config DEMO_HEARTBEAT_MICROROS
-	bool "micro-ROS (Phase 2: real DDS link)"
+	bool
+	default y if !DEMO_HEARTBEAT_STUB
 	select MICROROS
-
-endchoice
+	select CPP
+	select POSIX_API
 
 config DEMO_SHELL
 	bool "Demo shell (dds diagnostics + hb tuning)"
