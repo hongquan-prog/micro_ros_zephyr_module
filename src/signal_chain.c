@@ -47,6 +47,12 @@ LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 #define PWM_DUTY_HIGH_NSEC	87500U	/* 87.5% */
 #define HEALTH_PERIOD_TICKS	1000U	/* 1 s */
 
+/* Heartbeat reply watchdog: if Linux goes silent (no reply within
+ * HB_WATCHDOG_TIMEOUT_MS), fall back locally so PWM2/GPIO3 keep
+ * producing a visible control point. Pure software, no WDT hardware. */
+#define HB_WATCHDOG_PERIOD_MS	5U
+#define HB_WATCHDOG_TIMEOUT_MS	5U
+
 /* PWMs. */
 static const struct pwm_dt_spec pwm1 = {
 	.dev = DEVICE_DT_GET(DT_NODELABEL(pwm0)),
@@ -80,6 +86,10 @@ static const struct gpio_dt_spec gpio_probe3 = {
 
 static struct k_timer tick_timer;
 static struct k_sem tick_sem;
+static struct k_timer hb_watchdog;
+static volatile uint32_t last_reply_ms;
+static volatile bool reply_stalled;
+static volatile uint32_t wd_events;
 
 /* Control period, runtime-tunable via the "hb" shell.  The Kconfig
  * default is a TEMPORARY debugging value while the DDS link is being
@@ -124,11 +134,18 @@ static void tick_timer_expired(struct k_timer *timer)
 	k_sem_give(&tick_sem);
 }
 
-/* Control point 3: Linux heartbeat reply (workqueue context). */
+/* Control point 3: Linux heartbeat reply (reply-thread context). */
 static void heartbeat_reply(uint32_t linux_seq)
 {
 	atomic_set(&last_linux_seq, (atomic_val_t)linux_seq);
 	atomic_inc(&heartbeat_rx_count);
+
+	last_reply_ms = k_uptime_get_32();
+
+	if (reply_stalled) {
+		reply_stalled = false;
+		LOG_ERR("heartbeat reply recovered");
+	}
 
 	record_gpio_result(gpio_pin_toggle_dt(&gpio_probe3));
 
@@ -136,6 +153,30 @@ static void heartbeat_reply(uint32_t linux_seq)
 	pwm_set_dt(&pwm2, PWM_USEC(PWM_PERIOD_US),
 		   PWM_NSEC(pwm2_high_duty ? PWM_DUTY_HIGH_NSEC :
 					    PWM_DUTY_LOW_NSEC));
+}
+
+/* Reply watchdog: fires when Linux stops answering.  The local fallback
+ * runs the GPIO3/PWM2 control point directly (not via heartbeat_reply)
+ * so rx statistics are not polluted by synthetic events. */
+static void hb_watchdog_expired(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (k_uptime_get_32() - last_reply_ms > HB_WATCHDOG_TIMEOUT_MS) {
+		if (!reply_stalled) {
+			reply_stalled = true;
+			wd_events++;
+			LOG_ERR("heartbeat reply stalled (%u events)",
+				wd_events);
+		}
+
+		last_reply_ms = k_uptime_get_32();
+		record_gpio_result(gpio_pin_toggle_dt(&gpio_probe3));
+		pwm2_high_duty = !pwm2_high_duty;
+		pwm_set_dt(&pwm2, PWM_USEC(PWM_PERIOD_US),
+			   PWM_NSEC(pwm2_high_duty ? PWM_DUTY_HIGH_NSEC :
+					    PWM_DUTY_LOW_NSEC));
+	}
 }
 
 /* Control point 2: worker thread woken by the tick. */
@@ -259,6 +300,12 @@ int signal_chain_init(void)
 	 * changed at runtime with "hb period <ms>". */
 	k_timer_init(&tick_timer, tick_timer_expired, NULL);
 	k_sem_init(&tick_sem, 0, 1);
+
+	/* Reply watchdog: k_timer ISR context, local fallback on stall. */
+	last_reply_ms = k_uptime_get_32();
+	k_timer_init(&hb_watchdog, hb_watchdog_expired, NULL);
+	k_timer_start(&hb_watchdog, K_MSEC(HB_WATCHDOG_PERIOD_MS),
+		      K_MSEC(HB_WATCHDOG_PERIOD_MS));
 
 	/* Pin the control thread to CPU0, the same core the systick/rk_timer
 	 * interrupt is delivered on, to avoid cross-core wakeup jitter in the
