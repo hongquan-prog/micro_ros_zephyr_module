@@ -2,113 +2,374 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright (c) 2026 Process Mission
  *
- * Phase 2 real DDS heartbeat over micro-ROS.
+ * Real bidirectional heartbeat over micro-ROS and the ZVisor shared-memory
+ * transport. The two directions use separate topics:
  *
- * Single "heartbeat" topic carrying std_msgs/msg/Int32 in both
- * directions: zephyr publishes its sequence on every control point, and
- * subscribes to the same topic for the Linux replies.  DDS semantics
- * guarantee a publisher never receives its own samples, so the
- * subscriber only sees Linux-side data.
+ *   Zephyr -> Linux: /zephyr_int32_publisher
+ *   Linux  -> Zephyr: /host_int32_publisher
  *
- * The subscription callback defers the reply handling to the system
- * workqueue so the signal-chain control point keeps running in the same
- * context for both backends (stub and micro-ROS).
+ * The micro-ROS entities are owned by one supervisor thread. hb_send() only
+ * replaces the pending sequence number, so the signal-chain thread never
+ * blocks in DDS and stale heartbeats do not accumulate while the Agent is
+ * unavailable. When the Agent disconnects, the supervisor tears down and
+ * recreates the session without restarting the GPIO/PWM threads.
  */
+
+#include <errno.h>
+#include <stdbool.h>
+#include <string.h>
 
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
-#include <rclc/rclc.h>
 #include <rclc/executor.h>
+#include <rclc/rclc.h>
+#include <rmw_microros/rmw_microros.h>
 #include <std_msgs/msg/int32.h>
 
-#include <rmw_microros/rmw_microros.h>
 #include <microros_transports.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include "heartbeat_dds.h"
 
 LOG_MODULE_REGISTER(dds_microros, LOG_LEVEL_INF);
 
-#define HEARTBEAT_TOPIC "heartbeat"
-#define NODE_NAME       "zephyr_heartbeat"
+#define ZEPHYR_HEARTBEAT_TOPIC "zephyr_int32_publisher"
+#define LINUX_HEARTBEAT_TOPIC   "host_int32_publisher"
+#define NODE_NAME               "processone_zephyr_heartbeat"
 
-#define RCCHECK(fn)							      \
-	{								      \
-		rcl_ret_t temp_rc = fn;					      \
-		if ((temp_rc != RCL_RET_OK)) {				      \
-			LOG_ERR("Failed status on line %d: %d. Aborting.",	      \
-				__LINE__, (int)temp_rc);			      \
-			for (;;) {					      \
-			}						      \
-		}							      \
-	}
+#define AGENT_WAIT_INTERVAL_MS   250
+#define AGENT_PING_INTERVAL_MS   500
+#define AGENT_PING_TIMEOUT_MS    100
+#define AGENT_PING_FAILURE_LIMIT 2
+#define EXECUTOR_SPIN_TIMEOUT_NS RCL_MS_TO_NS(1)
+#define MICROROS_STACK_SIZE      24576
+#define REPLY_STACK_SIZE         1024
+#define REPLY_THREAD_PRIORITY    4
 
-static rcl_publisher_t publisher;
-static rcl_subscription_t subscriber;
-static rclc_support_t support;
-static rcl_node_t node;
-static rclc_executor_t executor;
+struct microros_entities {
+	rclc_support_t support;
+	rcl_node_t node;
+	rcl_publisher_t publisher;
+	rcl_subscription_t subscriber;
+	rclc_executor_t executor;
+	bool support_ready;
+	bool node_ready;
+	bool publisher_ready;
+	bool subscriber_ready;
+	bool executor_ready;
+};
 
+static struct microros_entities entities;
 static std_msgs__msg__Int32 tx_msg;
 static std_msgs__msg__Int32 rx_msg;
-
 static hb_recv_cb_t recv_cb;
-static struct k_work recv_work;
-static struct k_mutex rx_lock;
 
-K_THREAD_STACK_DEFINE(spin_stack, 4096);
-static struct k_thread spin_tid;
+K_SEM_DEFINE(recv_sem, 0, K_SEM_MAX_LIMIT);
+static atomic_t received_linux_seq;
+static atomic_t session_ready;
+static atomic_t initialized;
 
-/* Reply control point runs on the system workqueue, same as the stub. */
-static void recv_work_handler(struct k_work *work)
+static struct k_spinlock tx_lock;
+static uint32_t pending_tx_seq;
+static bool tx_pending;
+
+K_THREAD_STACK_DEFINE(microros_stack, MICROROS_STACK_SIZE);
+static struct k_thread microros_thread_data;
+
+K_THREAD_STACK_DEFINE(reply_stack, REPLY_STACK_SIZE);
+static struct k_thread reply_thread_data;
+
+static void log_entity_ready(uint8_t ordinal, const char *step)
 {
-	uint32_t linux_seq;
+	LOG_DBG("DDS entity %u/6 ready: %s", ordinal, step);
+}
 
-	ARG_UNUSED(work);
+static void log_rcl_failure(uint8_t ordinal, const char *step,
+			    rcl_ret_t result)
+{
+	rcl_error_string_t error = rcl_get_error_string();
+	const char *detail = error.str[0] != '\0' ? error.str : "not set";
 
-	k_mutex_lock(&rx_lock, K_FOREVER);
-	linux_seq = (uint32_t)rx_msg.data;
-	k_mutex_unlock(&rx_lock);
+	LOG_WRN("DDS entity %u/6 failed: %s result=%d detail='%s'",
+		ordinal, step, (int)result, detail);
+}
 
-	if (recv_cb != NULL) {
-		recv_cb(linux_seq);
+static void entities_reset(struct microros_entities *ctx)
+{
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->node = rcl_get_zero_initialized_node();
+	ctx->publisher = rcl_get_zero_initialized_publisher();
+	ctx->subscriber = rcl_get_zero_initialized_subscription();
+	ctx->executor = rclc_executor_get_zero_initialized_executor();
+}
+
+static void cleanup_result(const char *operation, rcl_ret_t result)
+{
+	if (result == RCL_RET_OK) {
+		return;
 	}
+
+	LOG_WRN("cleanup %s returned %d", operation, (int)result);
+	rcl_reset_error();
 }
 
-/* Subscription callback: executor (spin thread) context. */
-static void subscription_callback(const void *msgin)
+static void destroy_entities(struct microros_entities *ctx)
 {
-	const std_msgs__msg__Int32 *msg = msgin;
+	atomic_clear(&session_ready);
 
-	k_mutex_lock(&rx_lock, K_FOREVER);
-	rx_msg.data = msg->data;
-	k_mutex_unlock(&rx_lock);
+	if (ctx->support_ready) {
+		rmw_context_t *rmw_context =
+			rcl_context_get_rmw_context(&ctx->support.context);
 
-	k_work_submit(&recv_work);
+		if (rmw_context != NULL) {
+			(void)rmw_uros_set_context_entity_destroy_session_timeout(
+				rmw_context, 0);
+		}
+	}
+
+	if (ctx->executor_ready) {
+		cleanup_result("executor", rclc_executor_fini(&ctx->executor));
+	}
+	if (ctx->subscriber_ready) {
+		cleanup_result("subscriber",
+			       rcl_subscription_fini(&ctx->subscriber, &ctx->node));
+	}
+	if (ctx->publisher_ready) {
+		cleanup_result("publisher",
+			       rcl_publisher_fini(&ctx->publisher, &ctx->node));
+	}
+	if (ctx->node_ready) {
+		cleanup_result("node", rcl_node_fini(&ctx->node));
+	}
+	if (ctx->support_ready) {
+		cleanup_result("support", rclc_support_fini(&ctx->support));
+	}
+
+	entities_reset(ctx);
 }
 
-static void spin_thread(void *arg1, void *arg2, void *arg3)
+static void reply_thread(void *arg1, void *arg2, void *arg3)
 {
 	ARG_UNUSED(arg1);
 	ARG_UNUSED(arg2);
 	ARG_UNUSED(arg3);
 
 	while (true) {
-		rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-		usleep(1000);
+		k_sem_take(&recv_sem, K_FOREVER);
+		if (recv_cb != NULL) {
+			recv_cb((uint32_t)atomic_get(&received_linux_seq));
+		}
+	}
+}
+
+static void subscription_callback(const void *message)
+{
+	const std_msgs__msg__Int32 *received = message;
+
+	atomic_set(&received_linux_seq, (atomic_val_t)received->data);
+	/* Preserve one GPIO/PWM action per real DDS reply.  Unlike a single
+	 * k_work item, the counting semaphore does not coalesce replies that
+	 * arrive while the handler is already running. */
+	k_sem_give(&recv_sem);
+}
+
+static bool create_entities(struct microros_entities *ctx,
+			    rcl_allocator_t *allocator)
+{
+	rcl_ret_t result;
+	const char *failed_step = "support";
+	uint8_t failed_ordinal = 1U;
+
+	entities_reset(ctx);
+
+	result = rclc_support_init(&ctx->support, 0, NULL, allocator);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	ctx->support_ready = true;
+	log_entity_ready(1U, "support");
+
+	failed_step = "node";
+	failed_ordinal = 2U;
+	result = rclc_node_init_default(&ctx->node, NODE_NAME, "", &ctx->support);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	ctx->node_ready = true;
+	log_entity_ready(2U, "node");
+
+	failed_step = "publisher";
+	failed_ordinal = 3U;
+	result = rclc_publisher_init_best_effort(
+		&ctx->publisher, &ctx->node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+		ZEPHYR_HEARTBEAT_TOPIC);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	ctx->publisher_ready = true;
+	log_entity_ready(3U, "publisher /" ZEPHYR_HEARTBEAT_TOPIC);
+
+	failed_step = "subscriber";
+	failed_ordinal = 4U;
+	result = rclc_subscription_init_best_effort(
+		&ctx->subscriber, &ctx->node,
+		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+		LINUX_HEARTBEAT_TOPIC);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	ctx->subscriber_ready = true;
+	log_entity_ready(4U, "subscriber /" LINUX_HEARTBEAT_TOPIC);
+
+	failed_step = "executor";
+	failed_ordinal = 5U;
+	result = rclc_executor_init(&ctx->executor, &ctx->support.context, 1,
+				    allocator);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	ctx->executor_ready = true;
+	log_entity_ready(5U, "executor");
+
+	failed_step = "executor subscription";
+	failed_ordinal = 6U;
+	result = rclc_executor_add_subscription(
+		&ctx->executor, &ctx->subscriber, &rx_msg,
+		subscription_callback, ON_NEW_DATA);
+	if (result != RCL_RET_OK) {
+		goto fail;
+	}
+	log_entity_ready(6U, "executor subscription");
+
+	atomic_set(&session_ready, 1);
+	LOG_INF("Agent connected: tx=/%s rx=/%s",
+		ZEPHYR_HEARTBEAT_TOPIC, LINUX_HEARTBEAT_TOPIC);
+	return true;
+
+fail:
+	log_rcl_failure(failed_ordinal, failed_step, result);
+	rcl_reset_error();
+	zephyr_transport_set_session_active(true);
+	destroy_entities(ctx);
+	zephyr_transport_set_session_active(false);
+	return false;
+}
+
+static bool take_pending_sequence(uint32_t *sequence)
+{
+	k_spinlock_key_t key = k_spin_lock(&tx_lock);
+	bool pending = tx_pending;
+
+	if (pending) {
+		*sequence = pending_tx_seq;
+		tx_pending = false;
+	}
+	k_spin_unlock(&tx_lock, key);
+	return pending;
+}
+
+static bool publish_pending_sequence(void)
+{
+	uint32_t sequence;
+	rcl_ret_t result;
+
+	if (!take_pending_sequence(&sequence)) {
+		return true;
+	}
+
+	tx_msg.data = (int32_t)sequence;
+	result = rcl_publish(&entities.publisher, &tx_msg, NULL);
+	if (result == RCL_RET_OK) {
+		return true;
+	}
+
+	LOG_WRN("publish failed (%d), reconnecting", (int)result);
+	rcl_reset_error();
+	return false;
+}
+
+static void microros_thread(void *arg1, void *arg2, void *arg3)
+{
+	rcl_allocator_t allocator = rcl_get_default_allocator();
+
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+
+	LOG_INF("waiting for Micro-XRCE-DDS Agent");
+	while (true) {
+		int64_t next_ping_ms;
+		uint8_t ping_failures = 0;
+		bool session_error = false;
+
+		while (!create_entities(&entities, &allocator)) {
+			k_sleep(K_MSEC(AGENT_WAIT_INTERVAL_MS));
+		}
+
+		zephyr_transport_set_session_active(true);
+		next_ping_ms = k_uptime_get() + AGENT_PING_INTERVAL_MS;
+
+		while (!session_error) {
+			rcl_ret_t result = rclc_executor_spin_some(
+				&entities.executor, EXECUTOR_SPIN_TIMEOUT_NS);
+			int64_t now_ms = k_uptime_get();
+
+			if (result != RCL_RET_OK && result != RCL_RET_TIMEOUT) {
+				LOG_WRN("executor failed (%d), reconnecting",
+					(int)result);
+				rcl_reset_error();
+				session_error = true;
+			}
+
+			if (!session_error && !publish_pending_sequence()) {
+				session_error = true;
+			}
+
+			if (!session_error && now_ms >= next_ping_ms) {
+				if (rmw_uros_ping_agent(AGENT_PING_TIMEOUT_MS, 1) ==
+				    RMW_RET_OK) {
+					ping_failures = 0;
+				} else if (++ping_failures >=
+					   AGENT_PING_FAILURE_LIMIT) {
+					session_error = true;
+				}
+				next_ping_ms = now_ms + AGENT_PING_INTERVAL_MS;
+			}
+
+
+			/* A 1 ms executor wait bounds reply handling latency while still
+			 * blocking on the SHM RX doorbell instead of busy polling. */
+			if (!session_error) {
+				k_yield();
+			}
+		}
+
+		LOG_WRN("Agent disconnected, rebuilding entities");
+		destroy_entities(&entities);
+		zephyr_transport_set_session_active(false);
+		k_sleep(K_MSEC(AGENT_WAIT_INTERVAL_MS));
 	}
 }
 
 int hb_init(hb_recv_cb_t cb)
 {
-	rcl_allocator_t allocator = rcl_get_default_allocator();
+	if (!atomic_cas(&initialized, 0, 1)) {
+		return -EALREADY;
+	}
 
 	recv_cb = cb;
+	entities_reset(&entities);
+	atomic_clear(&received_linux_seq);
+	atomic_clear(&session_ready);
 
-	k_work_init(&recv_work, recv_work_handler);
-	k_mutex_init(&rx_lock);
+	k_thread_create(&reply_thread_data, reply_stack,
+			K_THREAD_STACK_SIZEOF(reply_stack), reply_thread,
+			NULL, NULL, NULL, K_PRIO_PREEMPT(REPLY_THREAD_PRIORITY),
+			0, K_NO_WAIT);
 
 	rmw_uros_set_custom_transport(
 		MICRO_ROS_FRAMING_REQUIRED,
@@ -118,48 +379,20 @@ int hb_init(hb_recv_cb_t cb)
 		zephyr_transport_write,
 		zephyr_transport_read);
 
-	RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-
-	RCCHECK(rclc_node_init_default(&node, NODE_NAME, "", &support));
-
-	RCCHECK(rclc_publisher_init_default(
-		&publisher,
-		&node,
-		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-		HEARTBEAT_TOPIC));
-
-	RCCHECK(rclc_subscription_init_default(
-		&subscriber,
-		&node,
-		ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-		HEARTBEAT_TOPIC));
-
-	RCCHECK(rclc_executor_init(&executor, &support.context, 1,
-				   &allocator));
-	RCCHECK(rclc_executor_add_subscription(
-		&executor, &subscriber, &rx_msg, subscription_callback,
-		ON_NEW_DATA));
-
-	tx_msg.data = 0;
-	rx_msg.data = 0;
-
-	k_thread_create(&spin_tid, spin_stack,
-			K_THREAD_STACK_SIZEOF(spin_stack),
-			spin_thread, NULL, NULL, NULL,
-			CONFIG_NUM_PREEMPT_PRIORITIES - 2, 0,
-			K_NO_WAIT);
-
-	LOG_INF("micro-ROS heartbeat ready (topic '%s')", HEARTBEAT_TOPIC);
+	k_thread_create(&microros_thread_data, microros_stack,
+			K_THREAD_STACK_SIZEOF(microros_stack), microros_thread,
+			NULL, NULL, NULL, K_PRIO_PREEMPT(5), 0, K_NO_WAIT);
 
 	return 0;
 }
 
 int hb_send(uint32_t seq)
 {
-	rcl_ret_t rc;
+	k_spinlock_key_t key = k_spin_lock(&tx_lock);
 
-	tx_msg.data = (int32_t)seq;
-	rc = rcl_publish(&publisher, &tx_msg, NULL);
+	pending_tx_seq = seq;
+	tx_pending = true;
+	k_spin_unlock(&tx_lock, key);
 
-	return (rc == RCL_RET_OK) ? 0 : -EIO;
+	return atomic_get(&session_ready) != 0 ? 0 : -ENOTCONN;
 }
