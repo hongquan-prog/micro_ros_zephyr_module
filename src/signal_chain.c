@@ -36,6 +36,12 @@ LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 #define PWM_DUTY_LOW_NSEC	12500U	/* 12.5% */
 #define PWM_DUTY_HIGH_NSEC	87500U	/* 87.5% */
 
+/* Heartbeat reply watchdog: if Linux goes silent (no reply within
+ * HB_WATCHDOG_TIMEOUT_MS), fall back locally so PWM2/GPIO3 keep
+ * producing a visible control point. Pure software, no WDT hardware. */
+#define HB_WATCHDOG_PERIOD_MS	5U
+#define HB_WATCHDOG_TIMEOUT_MS	5U
+
 /* PWMs. */
 static const struct pwm_dt_spec pwm1 = {
 	.dev = DEVICE_DT_GET(DT_NODELABEL(pwm0)),
@@ -71,6 +77,10 @@ static const struct device *tick_counter =
 	DEVICE_DT_GET(DT_NODELABEL(timer0));
 
 static struct k_sem tick_sem;
+static struct k_timer hb_watchdog;
+static volatile uint32_t last_reply_ms;
+static volatile bool reply_stalled;
+static volatile uint32_t wd_events;
 
 static uint32_t zephyr_seq;
 static bool pwm1_high_duty;
@@ -90,10 +100,18 @@ static void tick_top_callback(const struct device *dev, void *user_data)
 	k_sem_give(&tick_sem);
 }
 
-/* Control point 3: Linux heartbeat reply (workqueue context). */
+/* Control point 3: Linux heartbeat reply (workqueue context, or the
+ * local watchdog fallback from timer ISR context). */
 static void heartbeat_reply(uint32_t linux_seq)
 {
 	ARG_UNUSED(linux_seq);
+
+	last_reply_ms = k_uptime_get_32();
+
+	if (reply_stalled) {
+		reply_stalled = false;
+		LOG_ERR("heartbeat reply recovered");
+	}
 
 	gpio_pin_toggle_dt(&gpio_probe3);
 
@@ -101,6 +119,24 @@ static void heartbeat_reply(uint32_t linux_seq)
 	pwm_set_dt(&pwm2, PWM_USEC(PWM_PERIOD_US),
 		   PWM_NSEC(pwm2_high_duty ? PWM_DUTY_HIGH_NSEC :
 					    PWM_DUTY_LOW_NSEC));
+}
+
+/* Reply watchdog: fires when Linux stops answering. */
+static void hb_watchdog_expired(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+
+	if (k_uptime_get_32() - last_reply_ms > HB_WATCHDOG_TIMEOUT_MS) {
+		if (!reply_stalled) {
+			reply_stalled = true;
+			wd_events++;
+			LOG_ERR("heartbeat reply stalled (%u events)",
+				wd_events);
+		}
+
+		/* Local fallback: keep the control point alive. */
+		heartbeat_reply(0);
+	}
 }
 
 /* Control point 2: worker thread woken by the tick. */
@@ -180,6 +216,12 @@ int signal_chain_init(void)
 	top_cfg.flags = 0;
 
 	k_sem_init(&tick_sem, 0, 1);
+
+	/* Reply watchdog: k_timer ISR context, local fallback on stall. */
+	last_reply_ms = k_uptime_get_32();
+	k_timer_init(&hb_watchdog, hb_watchdog_expired, NULL);
+	k_timer_start(&hb_watchdog, K_MSEC(HB_WATCHDOG_PERIOD_MS),
+		      K_MSEC(HB_WATCHDOG_PERIOD_MS));
 
 	/* Same core as the tick ISR (see prj.conf): minimal, stable
 	 * ISR->thread handoff latency. The thread is blocked on the sem
