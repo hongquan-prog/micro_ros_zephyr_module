@@ -38,18 +38,13 @@
 
 #include "heartbeat_dds.h"
 #include "dds_diag.h"
+#include "signal_chain.h"
 
 LOG_MODULE_REGISTER(signal_chain, LOG_LEVEL_INF);
 
 #define PWM_PERIOD_US		100U	/* 10 kHz */
 #define PWM_DUTY_LOW_US		25U	/* 25% */
 #define PWM_DUTY_HIGH_US	75U	/* 75% */
-#define CONTROL_PERIOD_MS	20U	/* TEMPORARY debug value: 20 ms / 50 Hz.
-				 * Normal operation is 1U (1 ms / 1000 Hz); the
-				 * longer period thins out GPIO/PWM control points
-				 * and drops the health log to one line per
-				 * 1000 ticks = 20 s while debugging the DDS link.
-				 * Restore to 1U after the integration session. */
 #define HEALTH_PERIOD_TICKS	1000U	/* 1 s */
 
 /* PWMs. */
@@ -85,6 +80,11 @@ static const struct gpio_dt_spec gpio_probe3 = {
 
 static struct k_timer tick_timer;
 static struct k_sem tick_sem;
+
+/* Control period, runtime-tunable via the "hb" shell.  The Kconfig
+ * default is a TEMPORARY debugging value while the DDS link is being
+ * brought up (50 ms); normal operation is 1 ms. */
+static volatile uint32_t control_period_ms = CONFIG_DEMO_CONTROL_PERIOD_MS;
 
 static uint32_t zephyr_seq;
 static uint32_t control_count;
@@ -255,7 +255,8 @@ int signal_chain_init(void)
 
 	/* 1 ms systick: CONFIG_SYS_CLOCK_TICKS_PER_SEC = 1000.  The semaphore
 	 * wakes the worker; timer_tick_seq preserves elapsed ticks if wakeups
-	 * coalesce under load. */
+	 * coalesce under load.  The period is the Kconfig default and can be
+	 * changed at runtime with "hb period <ms>". */
 	k_timer_init(&tick_timer, tick_timer_expired, NULL);
 	k_sem_init(&tick_sem, 0, 1);
 
@@ -271,8 +272,8 @@ int signal_chain_init(void)
 		return ret;
 	}
 
-	k_timer_start(&tick_timer, K_MSEC(CONTROL_PERIOD_MS),
-		      K_MSEC(CONTROL_PERIOD_MS));
+	k_timer_start(&tick_timer, K_MSEC(control_period_ms),
+		      K_MSEC(control_period_ms));
 
 	LOG_INF("signal chain started: control=1ms heartbeat=request-per-cycle PWM=10kHz 25%%<->75%%");
 
@@ -290,4 +291,25 @@ void signal_chain_get_diag(struct signal_chain_diag *out)
 	out->gpio_errors = (uint32_t)atomic_get(&gpio_error_count);
 	out->pwm_errors = (uint32_t)atomic_get(&pwm_error_count);
 	out->tx_offline = (uint32_t)atomic_get(&heartbeat_send_error_count);
+}
+
+int signal_chain_set_period(uint32_t ms)
+{
+	if (ms < 1U || ms > 1000U) {
+		return -EINVAL;
+	}
+
+	/* Restart the tick timer with the new period; the worker derives
+	 * the output phase from timer_tick_seq, so the phase stays valid
+	 * across the change. */
+	control_period_ms = ms;
+	k_timer_stop(&tick_timer);
+	k_timer_start(&tick_timer, K_MSEC(ms), K_MSEC(ms));
+
+	return 0;
+}
+
+uint32_t signal_chain_get_period(void)
+{
+	return control_period_ms;
 }

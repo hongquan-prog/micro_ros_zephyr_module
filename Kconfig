@@ -22,12 +22,23 @@ config DEMO_HEARTBEAT_MICROROS
 
 endchoice
 
-config DEMO_DDS_SHELL
-	bool "DDS diagnostic shell (dds status/stats/shm)"
+config DEMO_SHELL
+	bool "Demo shell (dds diagnostics + hb tuning)"
 	default y
 	help
-	  Enable the "dds" shell command set for diagnosing the heartbeat
-	  link: session/entity/slot status, counters and shmem slot dumps.
+	  Enable the demo shell command sets:
+	  - "dds" diagnostics (status/stats/shm) for the heartbeat link;
+	  - "hb" business tuning (period/freq) for the signal chain.
 	  Requires CONFIG_SHELL=y (see prj.conf).
+
+config DEMO_CONTROL_PERIOD_MS
+	int "Signal-chain control period default (ms)"
+	default 50
+	range 1 1000
+	help
+	  Default control period of the signal chain (GPIO/PWM/heartbeat
+	  cadence).  TEMPORARY debugging value: 50 ms while the DDS link
+	  is being brought up; restore to 1 ms afterwards.  Can be
+	  overridden at runtime with "hb period <ms>" / "hb freq <hz>".
 
 endmenu

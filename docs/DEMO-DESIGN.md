@@ -18,7 +18,7 @@
 在 ROCK 5B+（rock_5b_plus/rk3588/smp）+ Zephyr 4.3.1 上打通
 **Zephyr ⇄ Linux 双 topic DDS 心跳闭环**：
 
-- 1ms 周期信号链（**临时调试值 20ms/50Hz**，见 §3）
+- 1ms 周期信号链（**临时调试值 50ms/20Hz**（Kconfig 默认，可 `hb period` 重设），见 §3）
 - 两路 PWM（10kHz、25%/75% 每控制点交替）
 - 三路 GPIO 链路打点（GPIO1 tick / GPIO2 控制点 / GPIO3 Linux 回复）
 - DDS：micro-ROS + ZVisor 共享内存 transport；Agent 断开自动重建会话
@@ -33,12 +33,12 @@
 | GPIO2（控制点打点） | Pin 28 | GPIO4_C5 | gpio4 / 21 | — | mux 0 |
 | GPIO3（回复打点） | Pin 29 | GPIO1_A3 | gpio1 / 3 | — | mux 0 |
 
-- 三路 GPIO 初始全低；每控制点翻转 → 方波（1ms 周期 = 500Hz；临时 20ms = 25Hz）。
+- 三路 GPIO 初始全低；每控制点翻转 → 方波（1ms 周期 = 500Hz；临时 50ms = 10Hz）。
 
 ## 3. 信号时序
 
 ```
-systick ISR (1ms/临时20ms)  -> GPIO1 toggle, timer_tick_seq++
+systick ISR (1ms/临时50ms)  -> GPIO1 toggle, timer_tick_seq++
         |  k_sem_give（仅唤醒提示，tick_seq 是真值源）
         v
 控制线程 (prio 0, pin 核0):
@@ -58,7 +58,7 @@ reply 线程 (prio 4): 每个回复 -> GPIO3 toggle + PWM2 翻转（计数信号
 - **心跳合并语义（预期行为）**：`hb_send` 只登记最新 seq，实际发布由 supervisor
   线程驱动；链路慢于发送节奏时中间心跳被合并、seq 跳号——这正是演示要观察的
   "流程丢失"。Linux 每收一个回一个，GPIO3 节奏由 Linux 回复节奏决定。
-- **临时周期**：`CONTROL_PERIOD_MS = 20`（50Hz）为联调调试值；恢复为 1 后
+- **临时周期**：`DEMO_CONTROL_PERIOD_MS = 50`（Kconfig 默认）为联调调试值，可 `hb period <ms>` 运行时重设；恢复为 1 后
   心跳 1kHz、GPIO 500Hz。
 
 ## 4. 软件架构
@@ -76,12 +76,13 @@ reply 线程 (prio 4): 每个回复 -> GPIO3 toggle + PWM2 翻转（计数信号
 ```
 demo/src/
 ├── main.c           # 后端感知的启动文案
-├── signal_chain.c   # 信号链：tick ISR → 控制线程 → 回复回调
+├── signal_chain.c/h # 信号链：tick ISR → 控制线程 → 回复回调；周期调优接口
 ├── heartbeat_dds.h  # 心跳抽象（hb_init / hb_send，非阻塞语义）
 ├── dds_stub.c       # P1 打桩（默认后端）
 ├── dds_microros.c   # P2 真 DDS：双 topic + supervisor/reply 线程
 ├── dds_diag.h       # 诊断快照结构 + 只读 getter 声明
-└── dds_shell.c      # "dds" 诊断 shell（status/stats/shm）
+├── dds_shell.c      # "dds" 诊断 shell（status/stats/shm）
+└── hb_shell.c       # "hb" 业务 shell（period/freq，信号链周期调优）
 ```
 
 ### DDS 后端要点
@@ -94,14 +95,14 @@ demo/src/
 
 ## 5. 日志
 
-- 控制台默认静默（仅 ERR），每秒（1000 ticks，20ms 周期下即 20s）一行的
+- 控制台默认静默（仅 ERR），每秒（1000 ticks，50ms 周期下即 50s）一行的
   健康日志为**严格简化版**：`hb t=%u c=%u m=%ld tx=%u rx=%u`。
 - 完整字段（last_linux / gpio_errors / pwm_errors / tx_offline）及调试降频方法
   见 `src/signal_chain.c` 中该行上方注释。
 
-## 6. DDS 诊断 shell（`dds` 命令集）
+## 6. Demo shell（集中式：`dds` 诊断 + `hb` 业务调优）
 
-针对联调（尤其"tx slot busy"）排障的集中式诊断工具：
+### 6.1 `dds` 命令集（心跳链路诊断，针对"tx slot busy"排障）
 
 | 命令 | 用途 |
 | --- | --- |
@@ -109,12 +110,23 @@ demo/src/
 | `dds stats [reset]` | 信号链计数（tx/rx/missed/errors）、DDS 计数（rebuilds/publish_fail/ping_fail）、transport 六计数器；reset 清 transport 计数 |
 | `dds shm [dump [n]]` | 槽位状态 + rsp 窗口 hexdump（协议级对帧） |
 
-实现要点：
+### 6.2 `hb` 命令集（信号链业务调优）
+
+控制周期是业务参数（决定 GPIO/PWM/心跳节奏），归 `hb` 而非 `dds`：
+
+| 命令 | 用途 |
+| --- | --- |
+| `hb period [ms]` | 查询/设置控制周期（1..1000ms，实时生效，反复可调）；默认值来自 Kconfig `DEMO_CONTROL_PERIOD_MS`（当前 50ms 调试值） |
+| `hb freq [hz]` | 同上，以频率视角（1..1000Hz，换算成 ms 写入同一变量） |
+
+限制：systick 定时器下最小有效周期 1ms；亚毫秒待 rk_timer 迁回后支持。
+
+### 实现要点
 - **transport 零改动**：槽位按 GPA 直读 shm 窗口，六计数器直接 extern 引用；
   "RSP 消费延迟"指标（ISR 到达→释放槽位）需改 transport，**待双方拍板后单独加**；
 - shell 轮询串口后端（中断驱动 uart2 挂起，见 TODO #9）、线程优先级 5（低于控制线程 0），
-  不污染 1ms 控制路径；
-- Kconfig `DEMO_DDS_SHELL`（默认 y，可关省 RAM）；stub 后端同样可运行；
+  不污染控制路径；
+- Kconfig `DEMO_SHELL`（默认 y，可关省 RAM）；stub 后端同样可运行；
 - 排障线索：`rsp=BUSY` 且 `wr_wait` 增长 = zephyr TX 被堵；`isr` 与 `rd` 差距大 =
   中断到了但消费不及时；`rd_to` 高 = RSP 迟迟无数据。
 
@@ -141,10 +153,10 @@ west build -b rock_5b_plus/rk3588/smp tasks/pwm-rk3588/demo -p -- \
 
 ## 9. 验证方法
 
-| 观测点 | 预期（1ms 周期时） | 预期（临时 20ms 周期） |
+| 观测点 | 预期（1ms 周期时） | 预期（临时 50ms 周期） |
 | --- | --- | --- |
 | GPIO1（Pin 37） | 500Hz 方波 | 25Hz 方波 |
 | GPIO2（Pin 28） | 滞后 GPIO1 一个调度延迟 | 同左 |
 | GPIO3（Pin 29） | 由 Linux 回复节奏驱动（≤500Hz，负载下变慢） | 同左 |
-| PWM1/2 | 10kHz，25/75 交替，控制点对齐各自 GPIO | 同左（控制点 20ms 一次） |
-| 串口 | `hb t=.. c=.. m=.. tx=.. rx=..` 一行/秒（20ms 周期下一行/20s） | — |
+| PWM1/2 | 10kHz，25/75 交替，控制点对齐各自 GPIO | 同左（控制点 50ms 一次） |
+| 串口 | `hb t=.. c=.. m=.. tx=.. rx=..` 一行/秒（50ms 周期下一行/50s） | — |

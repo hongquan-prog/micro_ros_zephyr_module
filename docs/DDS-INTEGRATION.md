@@ -57,6 +57,13 @@ zephyr 侧串口提供集中式诊断命令（实现 `src/dds_shell.c`）：
 | `dds stats [reset]` | 信号链/DDS/transport 全计数；reset 清 transport 计数 |
 | `dds shm [dump [n]]` | 槽位状态 + rsp 窗口 hexdump |
 
+业务调优命令集 `hb`（控制周期是信号链业务参数，不属 DDS 诊断）：
+
+| 命令 | 输出 |
+| --- | --- |
+| `hb period [ms]` | 查询/设置控制周期（1..1000ms，实时生效）；默认 Kconfig `DEMO_CONTROL_PERIOD_MS`（当前 50ms 调试值） |
+| `hb freq [hz]` | 同上，以频率视角（1..1000Hz） |
+
 - transport 模块当前零改动（槽位按 GPA 直读、计数器 extern 引用）；
 - **待定**："RSP 消费延迟"指标（ISR 到达→释放槽位的时间差）需在 transport 埋点，
   拍板后单独加，用于直接佐证 "tx slot busy = zephyr 消费不及时"。
